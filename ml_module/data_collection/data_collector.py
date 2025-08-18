@@ -1,6 +1,7 @@
+import json
 import time
 import requests
-import json
+from collections import Counter
 
 # Импорты для работы с базой данных
 from sqlalchemy import create_engine
@@ -17,9 +18,9 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # --- Константы Steam ---
 STEAM_GET_MATCH_HISTORY_API = "https://api.steampowered.com/IDOTA2Match_570/GetMatchHistoryBySequenceNum/V001/"
-START_MATCH_SEQ_NUM = 7_063_000_000
-MAX_MATCHES = 350
-CHUNK_SIZE = 100
+START_MATCH_SEQ_NUM = 7_063_000_002
+MAX_MATCHES = 25_000
+CHUNK_SIZE = 10_000
 BURST_TIME = 1754697600
 MATCHES_PER_REQUEST = 100
 DELAY_API_REQUESTS = 4
@@ -33,16 +34,44 @@ REQUIRED_PLAYER_KEYS = {"account_id", "team_number", "hero_id"}
 SUPPORT_ITEMS = {37, 43, 102, 185, 214, 218, 229, 254, 256, 269, 931, 1128}
 GAME_MODS = {1, 2, 3, 4, 5, 8, 16, 22}
 
+# Константы для расчета индекса руинера
+
+# KDA параметры по ролям
+CORE_EXPECTED_KDA = 4.8
+CORE_KDA_TOLERANCE = 4.3
+SUPPORT_EXPECTED_KDA = 3.5
+SUPPORT_KDA_TOLERANCE = 3.0
+
+# GPM параметры по ролям
+CORE_BASE_GPM = 500
+CORE_GPM_GROWTH_RATE = 6.0
+CORE_MAX_GPM = 800
+
+SUPPORT_BASE_GPM = 300
+SUPPORT_GPM_GROWTH_RATE = 5.0
+SUPPORT_MAX_GPM = 600
+
+INCOME_MINIMUM_THRESHOLD = 0.3  # 30% от ожидаемого net_worth
+
+# Веса для расчета индекса руинера
+TEAM_DEATH_WEIGHT = 0.25
+KDA_WEIGHT = 0.25
+
+# Общие веса (одинаковые для всех ролей)
+INCOME_SCORE_WEIGHT = 0.3
+CONTRIBUTION_SCORE_WEIGHT = 0.2
+
+# Другие параметры
+GPM_CALCULATION_START_MINUTE = 20  # С какой минуты начинается рост GPM
+RUINER_EMPTY_SLOTS_THRESHOLD = 4  # Количество пустых слотов для признания руинером
+RUINER_SAME_ITEMS_THRESHOLD = 4  # Количество одинаковых предметов для признания руинером
+
+RUINER_LOG_THRESHOLD = 0.45
+RUINER_DETECTION_THRESHOLD = 0.55
+
 EXCEPTIONS = {
     97: {102},  # Пример: для героя 97 (Magnus) предмет 102 не считается саппортским
 }
-
-# Константы логирования
-ENABLE_DETAILED_STATS = False  # Детальная статистика каждого API вызова
-ENABLE_RUINER_LOGGING = False  # Логирование руинеров
-ENABLE_ROLE_LOGGING = False  # Логирование ролей
-RUINER_LOG_THRESHOLD = 0.40
-RUINER_DETECTION_THRESHOLD = 0.50
 
 # Константы весов
 WEIGHT_ITEMS = 5
@@ -50,6 +79,11 @@ WEIGHT_NET_WORTH = 10
 WEIGHT_LAST_HITS = 5
 WEIGHT_GPM = 5
 WEIGHT_XPM = 5
+
+# Константы логирования
+ENABLE_DETAILED_STATS = True  # Детальная статистика каждого API вызова
+ENABLE_RUINER_LOGGING = False  # Логирование руинеров
+ENABLE_ROLE_LOGGING = False  # Логирование ролей
 
 
 # ANSI цвета для консоли
@@ -189,8 +223,8 @@ def filter_matches_secondary(steam_matches):
 
         # Назначаем роли
         try:
-            radiant_players = assign_roles(radiant_players, match["match_id"], "Radiant")
-            dire_players = assign_roles(dire_players, match["match_id"], "Dire")
+            radiant_players = assign_roles(radiant_players)
+            dire_players = assign_roles(dire_players)
         except ValueError:
             if ENABLE_DETAILED_STATS:
                 stats['excluded_role_assignment'] += 1
@@ -202,14 +236,16 @@ def filter_matches_secondary(steam_matches):
         # Проверяем команду Radiant
         has_ruiner = False
         for player in radiant_players:
-            if is_ruiner(player, match_duration_minutes, match["match_id"], match["radiant_score"]):
+            if is_ruiner(player, match_duration_minutes, match["match_id"], match["radiant_score"],
+                         match["dire_score"]):
                 has_ruiner = True
                 break
 
         # Проверяем команду Dire, если в Radiant нет руинеров
         if not has_ruiner:
             for player in dire_players:
-                if is_ruiner(player, match_duration_minutes, match["match_id"], match["dire_score"]):
+                if is_ruiner(player, match_duration_minutes, match["match_id"], match["dire_score"],
+                             match["radiant_score"]):
                     has_ruiner = True
                     break
 
@@ -217,6 +253,11 @@ def filter_matches_secondary(steam_matches):
             if ENABLE_DETAILED_STATS:
                 stats['excluded_ruiners'] += 1
             continue
+
+        # Логируем роли только для "чистых" матчей
+        if ENABLE_ROLE_LOGGING:
+            log_role_assignment(match["match_id"], radiant_players, "Radiant")
+            log_role_assignment(match["match_id"], dire_players, "Dire")
 
         # Сохраняем обработанные данные в матче
         match['processed_radiant_players'] = radiant_players
@@ -293,7 +334,7 @@ def create_match_dict(match):
     }
 
 
-def assign_roles(team_players, match_id=None, team_side="Unknown"):
+def assign_roles(team_players):
     """Назначает роли игрокам команды."""
     if len(team_players) != 5:
         raise ValueError("Команда должна состоять из 5 игроков.")
@@ -323,10 +364,6 @@ def assign_roles(team_players, match_id=None, team_side="Unknown"):
     support_count = sum(1 for p in team_players if p["role"] == "support")
     if core_count != 3 or support_count != 2:
         raise ValueError(f"Ошибка распределения ролей: {core_count} коров и {support_count} саппортов.")
-
-    # Логирование при необходимости
-    if ENABLE_ROLE_LOGGING and match_id:
-        log_role_assignment(match_id, team_players, team_side)
 
     return team_players
 
@@ -370,7 +407,7 @@ def calculate_support_score(player, team_stats):
 
 def log_role_assignment(match_id, team_players, team_side):
     """Логирование распределения ролей в команде."""
-    print(f"\n{Colors.CYAN}{'─' * 120}{Colors.RESET}")
+    print(f"{Colors.CYAN}{'─' * 120}{Colors.RESET}")
     print(f"{Colors.GREEN}► РАСПРЕДЕЛЕНИЕ РОЛЕЙ{Colors.RESET} | "
           f"Match ID: {Colors.YELLOW}{match_id}{Colors.RESET} | "
           f"Команда: {Colors.MAGENTA}{team_side}{Colors.RESET}")
@@ -387,51 +424,105 @@ def log_role_assignment(match_id, team_players, team_side):
     print(f"{Colors.CYAN}{'─' * 120}{Colors.RESET}")
 
 
-def is_ruiner(player, match_duration_minutes, match_id, team_score):
+def is_ruiner(player, match_duration_minutes, match_id, team_score, team_death):
     """Проверяет, является ли игрок руинером."""
+    from collections import Counter
+
     kills = player["kills"]
     deaths = player["deaths"]
     assists = player["assists"]
     net_worth = player["net_worth"]
     role = player["role"]
 
-    # Вычисляем Death Score
-    ds = deaths / (kills + assists + 1)
-    ds_norm = min(ds / 3.0, 1)
+    # Стандартный расчет индекса руинера
+    # Компонент 1: Доля смертей от командных
+    team_death_ratio = min(deaths / max(1, team_death), 1)
 
-    # Определяем ожидаемые параметры в зависимости от роли
+    # Компонент 2: Инвертированный KDA с учетом роли
+    kda = (kills + assists) / max(1, deaths)
+
+    tdr_weight, kda_weight = TEAM_DEATH_WEIGHT, KDA_WEIGHT
+    # Ожидаемый KDA в зависимости от роли
     if role == "core":
-        base_gpm, gpm_growth_rate, max_gpm = 500, 6.5, 800
+        expected_kda = CORE_EXPECTED_KDA
+        kda_tolerance = CORE_KDA_TOLERANCE
+        base_gpm, gpm_growth_rate, max_gpm = CORE_BASE_GPM, CORE_GPM_GROWTH_RATE, CORE_MAX_GPM
     else:
-        base_gpm, gpm_growth_rate, max_gpm = 300, 4.5, 500
+        expected_kda = SUPPORT_EXPECTED_KDA
+        kda_tolerance = SUPPORT_KDA_TOLERANCE
+        base_gpm, gpm_growth_rate, max_gpm = SUPPORT_BASE_GPM, SUPPORT_GPM_GROWTH_RATE, SUPPORT_MAX_GPM
+
+    # Нормализуем KDA в диапазон 0-1 (где 0 = хороший KDA, 1 = плохой)
+    kda_score = max(0, min(1, (expected_kda - kda) / kda_tolerance))
 
     # Вычисляем ожидаемый GPM и net worth
-    expected_gpm = min(base_gpm + gpm_growth_rate * max(0, match_duration_minutes - 15), max_gpm)
+    expected_gpm = min(base_gpm + gpm_growth_rate * max(0, match_duration_minutes - GPM_CALCULATION_START_MINUTE),
+                       max_gpm)
     expected_net_worth = match_duration_minutes * expected_gpm
-    is_score = min(net_worth / expected_net_worth, 1) if expected_net_worth > 0 else 1
+
+    # Income Score с учетом минимального порога
+    if expected_net_worth > 0:
+        income_ratio = net_worth / expected_net_worth
+        if income_ratio >= 1.0:
+            is_score = 1.0  # Отлично, больше ожидаемого
+        elif income_ratio <= INCOME_MINIMUM_THRESHOLD:
+            is_score = 0.0  # Ужасно, меньше минимального порога
+        else:
+            # Линейная интерполяция между минимальным порогом и 100%
+            is_score = (income_ratio - INCOME_MINIMUM_THRESHOLD) / (1.0 - INCOME_MINIMUM_THRESHOLD)
+    else:
+        is_score = 1.0
 
     # Contribution Score
     cs = (kills + assists) / max(team_score, 1)
 
     # Итоговый индекс руинера
-    ruiner_index = 0.4 * ds_norm + 0.3 * (1 - is_score) + 0.3 * (1 - cs)
+    ruiner_index = (tdr_weight * team_death_ratio +
+                    kda_weight * kda_score +
+                    INCOME_SCORE_WEIGHT * (1 - is_score) +
+                    CONTRIBUTION_SCORE_WEIGHT * (1 - cs))
+
+    # Проверка предметов на руинерское поведение
+    items = []
+    empty_slots = 0
+
+    # Собираем все предметы из основных слотов (item_0 до item_5)
+    for i in range(6):
+        item = player.get(f"item_{i}")
+        if item == 0 or item is None:
+            empty_slots += 1
+        else:
+            items.append(item)
+
+    # Если слишком много пустых слотов - руинер
+    if empty_slots >= RUINER_EMPTY_SLOTS_THRESHOLD:
+        ruiner_index = 1.0
+    # Если слишком много одинаковых предметов - руинер
+    elif len(items) >= RUINER_SAME_ITEMS_THRESHOLD:
+        item_counts = Counter(items)
+        for item_id, count in item_counts.items():
+            if count >= RUINER_SAME_ITEMS_THRESHOLD:
+                ruiner_index = 1.0
+                break
 
     # Логирование
     if ENABLE_RUINER_LOGGING and ruiner_index >= RUINER_LOG_THRESHOLD:
         log_ruiner_stats(match_id, player, ruiner_index, match_duration_minutes,
-                         role, ds_norm, is_score, cs, expected_gpm, team_score)
+                         role, team_death_ratio, kda_score, is_score, cs, expected_gpm, team_score,
+                         kda, expected_kda, tdr_weight, kda_weight)
 
     return ruiner_index > RUINER_DETECTION_THRESHOLD
 
 
-def log_ruiner_stats(match_id, player, ruiner_index, match_duration, role, ds_norm, is_score, cs, expected_gpm,
-                     team_score):
+def log_ruiner_stats(match_id, player, ruiner_index, match_duration, role, team_death_ratio, kda_score, is_score, cs,
+                     expected_gpm,
+                     team_score, kda, expected_kda, tdr_weight, kda_weight):
     """Логирование статистики потенциального руинера."""
     status = "РУИНЕР" if ruiner_index > RUINER_DETECTION_THRESHOLD else "ПОДОЗРЕНИЕ"
     status_color = Colors.RED if ruiner_index > RUINER_DETECTION_THRESHOLD else Colors.YELLOW
     hero_name = get_hero_name_by_id(player['hero_id'], HEROES_DATA)
 
-    print(f"\n{Colors.CYAN}{'─' * 60}{Colors.RESET}")
+    print(f"{Colors.CYAN}{'─' * 60}{Colors.RESET}")
     print(f"{status_color}► {status}{Colors.RESET} | "
           f"Match ID: {Colors.YELLOW}{match_id}{Colors.RESET} | "
           f"Player ID: {Colors.YELLOW}{player['account_id']}{Colors.RESET} | "
@@ -445,9 +536,10 @@ def log_ruiner_stats(match_id, player, ruiner_index, match_duration, role, ds_no
           f"{Colors.GREEN}GPM ожид:{Colors.RESET} {expected_gpm:.0f}")
 
     print(f"{Colors.GREEN}Метрики:{Colors.RESET} "
-          f"DS: {Colors.YELLOW}{0.4 * ds_norm:.3f}{Colors.RESET} ({Colors.YELLOW}{ds_norm * 100:.1f}%{Colors.RESET}) | "
-          f"IS: {Colors.YELLOW}{0.3 * (1 - is_score):.3f}{Colors.RESET} ({Colors.YELLOW}{(1 - is_score) * 100:.1f}%{Colors.RESET}) | "
-          f"CS: {Colors.YELLOW}{0.3 * (1 - cs):.3f}{Colors.RESET} ({Colors.YELLOW}{(1 - cs) * 100:.1f}%{Colors.RESET})")
+          f"TDR: {Colors.YELLOW}{tdr_weight * team_death_ratio:.3f}{Colors.RESET} ({Colors.YELLOW}{team_death_ratio * 100:.1f}%{Colors.RESET}) | "
+          f"KDA: {Colors.YELLOW}{kda_weight * kda_score:.3f}{Colors.RESET} ({Colors.YELLOW}{kda:.2f}{Colors.RESET}/{Colors.YELLOW}{expected_kda:.1f}{Colors.RESET}|{Colors.YELLOW}{kda_score * 100:.1f}%{Colors.RESET}) | "
+          f"IS: {Colors.YELLOW}{INCOME_SCORE_WEIGHT * (1 - is_score):.3f}{Colors.RESET} ({Colors.YELLOW}{(1 - is_score) * 100:.1f}%{Colors.RESET}) | "
+          f"CS: {Colors.YELLOW}{CONTRIBUTION_SCORE_WEIGHT * (1 - cs):.3f}{Colors.RESET} ({Colors.YELLOW}{(1 - cs) * 100:.1f}%{Colors.RESET})")
 
     print(f"{Colors.CYAN}{'─' * 60}{Colors.RESET}")
 
@@ -677,7 +769,7 @@ def main():
 
     try:
         print(f"\n{Colors.CYAN}{'=' * 70}{Colors.RESET}")
-        print(f"\t\t{Colors.CYAN}🚀 ЗАПУСК СБОРА ДАННЫХ DOTA 2 МАТЧЕЙ{Colors.RESET}")
+        print(f"\t\t\t{Colors.CYAN}🚀 ЗАПУСК СБОРА ДАННЫХ О МАТЧАХ DOTA 2{Colors.RESET}")
         print(f"{Colors.CYAN}{'=' * 70}{Colors.RESET}")
 
         print(f"{Colors.GREEN}📋 КОНФИГУРАЦИЯ:{Colors.RESET}")
@@ -700,15 +792,15 @@ def main():
         print(
             f"  👥 Логирование ролей: {Colors.GREEN if ENABLE_ROLE_LOGGING else Colors.RED}{'ВКЛ' if ENABLE_ROLE_LOGGING else 'ВЫКЛ'}{Colors.RESET}")
 
-        estimated_api_calls = (MAX_MATCHES // MATCHES_PER_REQUEST) + 1
-        estimated_time_min = (estimated_api_calls * DELAY_API_REQUESTS + 1.0) / 60
+        estimated_api_calls = (MAX_MATCHES // 45) + 1
+        estimated_time_min = (estimated_api_calls * (DELAY_API_REQUESTS + 1.5)) / 60
 
         print(f"\n{Colors.YELLOW}⏳ ПРЕДВАРИТЕЛЬНАЯ ОЦЕНКА:{Colors.RESET}")
         print(f"  🔢 Примерно API вызовов: {Colors.YELLOW}~{estimated_api_calls:,}{Colors.RESET}")
         print(f"  ⏰ Минимальное время: {Colors.YELLOW}~{estimated_time_min:.1f} мин{Colors.RESET}")
 
         print(f"{Colors.CYAN}{'=' * 70}{Colors.RESET}")
-        print(f"\n\n{Colors.GREEN}▶️  НАЧАЛИ СБОР ДАННЫХ...{Colors.RESET}\n")
+        print(f"\n{Colors.GREEN}▶️ НАЧАЛО ПРОЦЕССА СБОРА ИНФОРМАЦИИ...{Colors.RESET}")
 
         # ИЗМЕНЕНИЕ: проверяем количество обработанных матчей, а не сохранённых
         while total_processed_matches < MAX_MATCHES:
@@ -749,7 +841,7 @@ def main():
                 current_batch_count = len(processed_matches)
 
                 print(
-                    f"{Colors.YELLOW}⚠️  Достигнут лимит! Обрезаем батч до {current_batch_count} матчей{Colors.RESET}")
+                    f"\n{Colors.YELLOW}⚠️  Достигнут лимит! Обрезаем батч до {current_batch_count} матчей{Colors.RESET}\n")
 
             # Добавляем обработанные матчи в батч для сохранения
             batch_matches.extend(processed_matches)
@@ -767,13 +859,13 @@ def main():
             # Минималистичный основной вывод
             print(f"{Colors.BLUE}📡 API #{steam_api_calls}{Colors.RESET} | "
                   f"Получено: {Colors.YELLOW}{batch_stats['api_input']}{Colors.RESET} → "
-                  f"1-я фильтр: {Colors.YELLOW}{batch_stats['primary_filtered']}{Colors.RESET} → "
-                  f"2-я фильтр: {Colors.YELLOW}{batch_stats['secondary_filtered']}{Colors.RESET} → "
+                  f"1-й фильтр: {Colors.YELLOW}{batch_stats['primary_filtered']}{Colors.RESET} → "
+                  f"2-й фильтр: {Colors.YELLOW}{batch_stats['secondary_filtered']}{Colors.RESET} → "
                   f"Обработано: {Colors.CYAN}{current_batch_count}{Colors.RESET}")
 
             print(f"  💾 Всего обработано: {Colors.CYAN}{total_processed_matches}{Colors.RESET} | "
                   f"Уже в БД: {Colors.GREEN}{total_saved_matches}{Colors.RESET} | "
-                  f"⏱️  {Colors.MAGENTA}{iteration_time:.1f}с{Colors.RESET} (с задержкой)")
+                  f"⏱️  {Colors.MAGENTA}{iteration_time:.1f}с{Colors.RESET}")
 
             # Детальная статистика (если включена)
             print_processing_stats(batch_stats, steam_api_calls)
@@ -781,7 +873,7 @@ def main():
             # ИСПРАВЛЕНИЕ: проверяем лимит ПЕРЕД сохранением
             if total_processed_matches >= MAX_MATCHES:
                 print(
-                    f"\n{Colors.GREEN}🎯 Достигнут целевой лимит: {total_processed_matches} матчей обработано!{Colors.RESET}")
+                    f"\n{Colors.GREEN}🎯 Достигнут целевой лимит: {total_processed_matches} матчей!{Colors.RESET}")
                 break
 
             # Сохранение в БД по достижении размера чанка (только если не достигли лимита)
@@ -794,7 +886,7 @@ def main():
 
         # Сохранение остатка матчей
         if batch_matches:
-            print(f"\n{Colors.YELLOW}💾 Сохраняем остаток: {len(batch_matches)} матчей{Colors.RESET}")
+            print(f"{Colors.YELLOW}💾 Сохраняем остаток: {len(batch_matches)} матчей{Colors.RESET}")
             saved_count = save_matches_to_db(session, batch_matches, total_saved_matches, chunk_start_time,
                                              program_start_time)
             total_saved_matches += saved_count
@@ -806,13 +898,13 @@ def main():
         total_time = time.time() - program_start_time
         overall_speed = (total_saved_matches / total_time * 60) if total_time > 0 else 0
 
-        print("\n" + "=" * 70)
-        print(f"{Colors.GREEN}🏁 ИТОГОВАЯ СТАТИСТИКА{Colors.RESET}")
-        print("=" * 70)
+        print(f"\n{Colors.CYAN}{'=' * 70}{Colors.RESET}")
+        print(f"\t\t\t\t\t{Colors.CYAN}🏁 ИТОГОВАЯ СТАТИСТИКА{Colors.RESET}")
+        print(f"{Colors.CYAN}{'=' * 70}{Colors.RESET}")
         print(f"🎯 Целевое количество: {Colors.YELLOW}{MAX_MATCHES:,}{Colors.RESET} матчей")
         print(f"📊 Всего обработано: {Colors.CYAN}{total_processed_matches:,}{Colors.RESET} матчей")
         print(f"✅ Финально сохранено: {Colors.GREEN}{total_saved_matches:,}{Colors.RESET} матчей")
-        print(f"🔢 Всего вызовов Steam API: {Colors.YELLOW}{steam_api_calls}{Colors.RESET}")
+        print(f"🔢 Вызовов Steam API: {Colors.YELLOW}{steam_api_calls}{Colors.RESET}")
         print(f"⏱️ Общее время работы: {Colors.MAGENTA}{total_time / 60:.1f}{Colors.RESET} минут")
         print(f"🚀 Средняя скорость: {Colors.GREEN}{overall_speed:.1f}{Colors.RESET} матчей в минуту")
 
@@ -833,7 +925,7 @@ def main():
                 if count > 0:
                     print(f"  - {reason}: {Colors.RED}{count:,}{Colors.RESET}")
 
-        print("=" * 70)
+        print(f"{Colors.CYAN}{'=' * 70}{Colors.RESET}")
 
 
 if __name__ == "__main__":
