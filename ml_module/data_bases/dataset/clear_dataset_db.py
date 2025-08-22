@@ -1,8 +1,8 @@
 from sqlalchemy import create_engine, text
-from config import DATABASE_URL
+from config import DATASET_DATABASE_URL
 from models import Match, MatchPlayer
 
-engine = create_engine(DATABASE_URL)
+engine = create_engine(DATASET_DATABASE_URL)
 
 
 def clear_database():
