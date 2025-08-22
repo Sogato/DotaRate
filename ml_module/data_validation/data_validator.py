@@ -1,4 +1,3 @@
-import json
 import time
 from datetime import datetime
 from collections import defaultdict
@@ -8,7 +7,9 @@ from sqlalchemy.exc import SQLAlchemyError
 
 # Импорт моделей базы данных
 from data_bases.dataset.models import Match, MatchPlayer
-from config import DATASET_DATABASE_URL
+from data_bases.heroes.models import Hero
+from config import (DATASET_DATABASE_URL, HEROES_DATABASE_URL, PRIVATE_ACCOUNT_ID, MINIMUM_GAMES_FOR_HERO_WINRATE,
+                    MINIMUM_GAMES_FOR_HERO_VARIANT_WINRATE, TOP_HEROES_DISPLAY_COUNT, TOWERS_BITMASK, BARRACKS_BITMASK)
 
 # Импорт утилит для консольного вывода
 from utils.console import (
@@ -19,53 +20,71 @@ from utils.console import (
     print_status_message
 )
 
-# === КОНСТАНТЫ ДЛЯ АНАЛИЗА ===
-PRIVATE_ACCOUNT_ID = 4294967295  # ID для приватных аккаунтов Steam
-MINIMUM_GAMES_FOR_HERO_WINRATE = 100  # Минимум игр для анализа винрейта героев
-MINIMUM_GAMES_FOR_HERO_VARIANT_WINRATE = 50  # Минимум игр для анализа винрейта вариантов
-TOP_HEROES_DISPLAY_COUNT = 20  # Количество героев для отображения в топах
+# === НАСТРОЙКИ БАЗЫ ДАННЫХ ===
+# Основная БД (датасет матчей dota 2)
+dataset_engine = create_engine(DATASET_DATABASE_URL)
+DatasetSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=dataset_engine)
 
-# Битовые маски для анализа структур
-TOWERS_BITMASK = 0x7FF  # 11 единиц для 11 башен
-BARRACKS_BITMASK = 0x3F  # 6 единиц для 6 казарм
+# БД героев (справочная информация)
+heroes_engine = create_engine(HEROES_DATABASE_URL)
+HeroesSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=heroes_engine)
+
+# Глобальный кэш для героев (загружается один раз при старте кода)
+HEROES_CACHE = {}
 
 
-def load_heroes_data_from_json(file_path: str = "../data/dota2_heroes_data.json") -> list:
+def initialize_heroes_cache():
     """
-    Загружает данные о героях из JSON файла с обработкой ошибок
+    Инициализирует кэш героев из базы данных для быстрого доступа.
 
-    Args:
-        file_path: Путь к JSON файлу с данными героев
+    Загружает всех героев из БД в память для избежания множественных запросов
+    при обработке матчей. Кэш представляет собой словарь {hero_id: hero_name}.
 
     Returns:
-        Список словарей с данными героев или пустой список при ошибке
+        bool: True если кэш успешно загружен, False в случае ошибки
+
+    Raises:
+        Exception: При ошибках подключения к БД или отсутствии данных
     """
+    global HEROES_CACHE
+
+    heroes_session = HeroesSessionLocal()
     try:
-        with open(file_path, "r", encoding='utf-8') as file:
-            return json.load(file)
-    except FileNotFoundError:
-        print_status_message(f"Файл с данными героев не найден: {file_path}", "warning")
-        return []
-    except json.JSONDecodeError:
-        print_status_message(f"Ошибка чтения JSON файла: {file_path}", "error")
-        return []
+        print_status_message("Загрузка данных героев из базы данных...", "info", "📚")
+
+        # Получаем всех героев из БД
+        heroes = heroes_session.query(Hero).all()
+
+        if not heroes:
+            print_status_message("ВНИМАНИЕ: База данных героев пуста!", "warning", "⚠️")
+            return False
+
+        # Заполняем кэш словарем {id: localized_name}
+        for hero in heroes:
+            HEROES_CACHE[hero.id] = hero.localized_name
+
+        print_status_message(f"Загружено {len(HEROES_CACHE)} героев в кэш", "success", "✅")
+        return True
+
+    except Exception as e:
+        print_status_message(f"Ошибка при загрузке героев из БД: {e}", "error", "❌")
+        return False
+
+    finally:
+        heroes_session.close()
 
 
-def get_hero_name_by_id(hero_id: int, heroes_data: list) -> str:
+def get_hero_name_by_id(hero_id: int) -> str:
     """
-    Получает локализованное имя героя по его уникальному ID
+    Получает локализованное имя героя по его уникальному ID из кэша.
 
     Args:
-        hero_id: Уникальный идентификатор героя
-        heroes_data: Список данных о героях
+        hero_id (int): Уникальный идентификатор героя
 
     Returns:
-        Локализованное имя героя или строка с ID если герой не найден
+        str: Локализованное название героя или "Unknown Hero (ID: X)" если не найден
     """
-    for hero in heroes_data:
-        if hero.get('id') == hero_id:
-            return hero.get('localized_name', f'Unknown Hero {hero_id}')
-    return f'Unknown Hero {hero_id}'
+    return HEROES_CACHE.get(hero_id, f"Unknown Hero (ID: {hero_id})")
 
 
 def format_timestamp_to_readable_date(timestamp: int) -> str:
@@ -252,7 +271,7 @@ def validate_database_integrity(session) -> list:
     return integrity_issues
 
 
-def analyze_match_statistics(session, heroes_data: list):
+def analyze_match_statistics(session):
     """
     Проводит комплексный анализ статистики матчей
 
@@ -268,7 +287,6 @@ def analyze_match_statistics(session, heroes_data: list):
 
     Args:
         session: Сессия SQLAlchemy для работы с БД
-        heroes_data: Список данных о героях (не используется в этой функции)
     """
     print_section_header("СТАТИСТИКА МАТЧЕЙ", "📊", color=Colors.BRIGHT_MAGENTA)
 
@@ -557,7 +575,7 @@ def _calculate_average_structure_destruction(matches_structure_data: list):
                     Colors.BRIGHT_WHITE, Colors.BRIGHT_MAGENTA)
 
 
-def analyze_player_statistics(session, heroes_data: list):
+def analyze_player_statistics(session):
     """
     Проводит комплексный анализ статистики игроков
 
@@ -576,7 +594,6 @@ def analyze_player_statistics(session, heroes_data: list):
 
     Args:
         session: Сессия SQLAlchemy для работы с БД
-        heroes_data: Список данных о героях для получения имен
     """
     print_section_header("СТАТИСТИКА ИГРОКОВ", "👥", color=Colors.BRIGHT_GOLD)
 
@@ -622,13 +639,13 @@ def analyze_player_statistics(session, heroes_data: list):
     _analyze_role_statistics(session, total_player_records)
 
     # === АНАЛИЗ ПОПУЛЯРНОСТИ ГЕРОЕВ ===
-    _analyze_hero_popularity(session, heroes_data, total_player_records)
+    _analyze_hero_popularity(session, total_player_records)
 
     # === АНАЛИЗ ВИНРЕЙТА ГЕРОЕВ ===
-    _analyze_hero_winrates(session, heroes_data)
+    _analyze_hero_winrates(session)
 
     # === АНАЛИЗ ВИНРЕЙТА ГЕРОЕВ С ВАРИАНТАМИ ===
-    _analyze_hero_variant_winrates(session, heroes_data)
+    _analyze_hero_variant_winrates(session)
 
     # === АНАЛИЗ СТАТИСТИКИ ВАРИАНТОВ ===
     _analyze_hero_variants_statistics(session, total_player_records)
@@ -709,7 +726,7 @@ def _analyze_role_statistics(session, total_player_records: int):
                         "🏹", Colors.BRIGHT_WHITE, Colors.BRIGHT_MINT)
 
 
-def _analyze_hero_popularity(session, heroes_data: list, total_player_records: int):
+def _analyze_hero_popularity(session, total_player_records: int):
     """Анализирует популярность героев (топ-20)"""
     print_subsection_header(f"Топ-{TOP_HEROES_DISPLAY_COUNT} популярных героев", "🦸", Colors.BRIGHT_BLUE)
 
@@ -722,7 +739,7 @@ def _analyze_hero_popularity(session, heroes_data: list, total_player_records: i
         .limit(TOP_HEROES_DISPLAY_COUNT).all()
 
     for rank, (hero_id, count, avg_kda) in enumerate(hero_popularity_stats, 1):
-        hero_name = get_hero_name_by_id(hero_id, heroes_data)
+        hero_name = get_hero_name_by_id(hero_id)
         percentage = (count / total_player_records) * 100
 
         rank_color = Colors.BRIGHT_GOLD if rank <= 3 else Colors.BRIGHT_SILVER if rank <= 10 else Colors.BRIGHT_WHITE
@@ -734,7 +751,7 @@ def _analyze_hero_popularity(session, heroes_data: list, total_player_records: i
               f"KDA: {Colors.BRIGHT_ORANGE}{avg_kda:.2f}{Colors.RESET}")
 
 
-def _analyze_hero_winrates(session, heroes_data: list):
+def _analyze_hero_winrates(session):
     """Анализирует винрейт героев (топ-20 по винрейту, минимум 100 игр)"""
     print_subsection_header(
         f"Топ-{TOP_HEROES_DISPLAY_COUNT} героев по винрейту (мин. {MINIMUM_GAMES_FOR_HERO_WINRATE} игр)", "🏆",
@@ -769,7 +786,7 @@ def _analyze_hero_winrates(session, heroes_data: list):
 
         # Выводим топ-20
         for rank, (hero_id, total_games, wins, winrate) in enumerate(hero_winrates[:TOP_HEROES_DISPLAY_COUNT], 1):
-            hero_name = get_hero_name_by_id(hero_id, heroes_data)
+            hero_name = get_hero_name_by_id(hero_id)
 
             rank_color = Colors.BRIGHT_GOLD if rank <= 3 else Colors.BRIGHT_SILVER if rank <= 10 else Colors.BRIGHT_WHITE
             winrate_color = Colors.BRIGHT_GREEN if winrate >= 55 else Colors.BRIGHT_YELLOW if winrate >= 50 else Colors.BRIGHT_RED
@@ -785,7 +802,7 @@ def _analyze_hero_winrates(session, heroes_data: list):
         print_status_message(f"Ошибка при расчете винрейта героев: {e}", "error")
 
 
-def _analyze_hero_variant_winrates(session, heroes_data: list):
+def _analyze_hero_variant_winrates(session):
     """Анализирует винрейт героев с учетом вариантов (топ-20 по винрейту, минимум 50 игр)"""
     print_subsection_header(
         f"Топ-{TOP_HEROES_DISPLAY_COUNT} героев по винрейту (с вариантами, мин. {MINIMUM_GAMES_FOR_HERO_VARIANT_WINRATE} игр)",
@@ -823,7 +840,7 @@ def _analyze_hero_variant_winrates(session, heroes_data: list):
         # Выводим топ-20
         for rank, (hero_id, hero_variant, total_games, wins, winrate) in enumerate(
                 hero_variant_winrates[:TOP_HEROES_DISPLAY_COUNT], 1):
-            hero_name = get_hero_name_by_id(hero_id, heroes_data)
+            hero_name = get_hero_name_by_id(hero_id)
             variant_text = f" (вариант {hero_variant})" if hero_variant > 0 else ""
 
             rank_color = Colors.BRIGHT_GOLD if rank <= 3 else Colors.BRIGHT_SILVER if rank <= 10 else Colors.BRIGHT_WHITE
@@ -988,13 +1005,13 @@ def _analyze_special_items_statistics(session, total_player_records: int):
         print_status_message(f"Ошибка при анализе Aghanim's предметов: {e}", "error")
 
 
-def main(database_url: str = None, heroes_data_path: str = "../data/dota2_heroes_data.json"):
+def main(database_url: str = None):
     """
     Главная функция для комплексной проверки и анализа датасета Dota 2
 
     Выполняет полный цикл проверки и анализа:
     1. Подключение к базе данных
-    2. Загрузка данных о героях
+    2. Загрузка данных о героях из БД
     3. Проверка целостности данных
     4. Анализ статистики матчей
     5. Анализ статистики игроков
@@ -1002,7 +1019,6 @@ def main(database_url: str = None, heroes_data_path: str = "../data/dota2_heroes
 
     Args:
         database_url: URL базы данных. Если None, использует DATABASE_URL из config
-        heroes_data_path: Путь к файлу с данными героев
     """
     program_start_time = time.time()
 
@@ -1019,8 +1035,10 @@ def main(database_url: str = None, heroes_data_path: str = "../data/dota2_heroes
         print_status_message("Подключение к базе данных установлено", "success")
 
         # === ЗАГРУЗКА ДАННЫХ О ГЕРОЯХ ===
-        heroes_data = load_heroes_data_from_json(heroes_data_path)
-        print_status_message(f"Загружено данных о {len(heroes_data)} героях", "success")
+        if not initialize_heroes_cache():
+            print_status_message("КРИТИЧЕСКАЯ ОШИБКА: Не удалось загрузить данные героев!", "error", "💥")
+            print_status_message("Убедитесь, что база данных героев существует и заполнена.", "warning", "⚠️")
+            return
 
         # === ПРОВЕРКА СУЩЕСТВОВАНИЯ ТАБЛИЦ ===
         try:
@@ -1042,10 +1060,10 @@ def main(database_url: str = None, heroes_data_path: str = "../data/dota2_heroes
         integrity_issues = validate_database_integrity(session)
 
         # 2. Анализ статистики матчей
-        analyze_match_statistics(session, heroes_data)
+        analyze_match_statistics(session)
 
         # 3. Анализ статистики игроков
-        analyze_player_statistics(session, heroes_data)
+        analyze_player_statistics(session)
 
         # === ИТОГОВЫЙ ОТЧЕТ ===
         _generate_final_report(program_start_time, matches_count, players_count, integrity_issues)
@@ -1084,6 +1102,8 @@ def _generate_final_report(program_start_time: float, matches_count: int,
                     Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN)
     print_info_line("Проанализировано записей игроков", f"{players_count:,}", "👥",
                     Colors.BRIGHT_WHITE, Colors.BRIGHT_CYAN)
+    print_info_line("Загружено героев в кэш", f"{len(HEROES_CACHE):,}", "🦸",
+                    Colors.BRIGHT_WHITE, Colors.BRIGHT_BLUE)
 
     if integrity_issues:
         print_status_message(f"ВНИМАНИЕ! Обнаружены проблемы целостности данных: {len(integrity_issues)}", "warning")
