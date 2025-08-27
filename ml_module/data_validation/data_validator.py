@@ -1,7 +1,25 @@
+"""
+Модуль для комплексной валидации и анализа датасета матчей Dota 2.
+
+Основные функции:
+- Проверка целостности и корректности данных в базе
+- Анализ статистики матчей (длительность, режимы, баланс команд)
+- Исследование игровых структур (башни, казармы)
+- Анализ статистики игроков (KDA, роли, экономика)
+- Изучение популярности и винрейта героев
+- Генерация комплексного отчета о качестве данных
+
+Валидация включает:
+- Проверку уникальности ключевых полей
+- Выявление NULL значений в критических полях
+- Контроль корректности ролей и номеров команд
+- Анализ связности данных между таблицами
+- Статистический анализ распределений
+"""
+
 import time
 from datetime import datetime
-from collections import defaultdict
-from sqlalchemy import create_engine, func, distinct
+from sqlalchemy import create_engine, func, distinct, text, case
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -9,7 +27,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from data_bases.dataset.models import Match, MatchPlayer
 from data_bases.heroes.models import Hero
 from config import (DATASET_DATABASE_URL, HEROES_DATABASE_URL, PRIVATE_ACCOUNT_ID, MINIMUM_GAMES_FOR_HERO_WINRATE,
-                    MINIMUM_GAMES_FOR_HERO_VARIANT_WINRATE, TOP_HEROES_DISPLAY_COUNT, TOWERS_BITMASK, BARRACKS_BITMASK)
+                    MINIMUM_GAMES_FOR_HERO_VARIANT_WINRATE, TOP_HEROES_DISPLAY_COUNT,
+                    PRIVATE_ACCOUNTS_WARNING_THRESHOLD, DUPLICATE_DISPLAY_LIMIT, TOWERS_BITMASK, BARRACKS_BITMASK)
 
 # Импорт утилит для консольного вывода
 from utils.console import (
@@ -20,31 +39,30 @@ from utils.console import (
     print_status_message
 )
 
-# === НАСТРОЙКИ БАЗЫ ДАННЫХ ===
-# Основная БД (датасет матчей dota 2)
-dataset_engine = create_engine(DATASET_DATABASE_URL)
-DatasetSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=dataset_engine)
-
 # БД героев (справочная информация)
 heroes_engine = create_engine(HEROES_DATABASE_URL)
 HeroesSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=heroes_engine)
 
-# Глобальный кэш для героев (загружается один раз при старте кода)
+# Глобальный кэш для героев (для быстрого получения имен по ID)
 HEROES_CACHE = {}
 
 
-def initialize_heroes_cache():
+def initialize_heroes_cache() -> bool:
     """
     Инициализирует кэш героев из базы данных для быстрого доступа.
 
-    Загружает всех героев из БД в память для избежания множественных запросов
-    при обработке матчей. Кэш представляет собой словарь {hero_id: hero_name}.
+    Загружает всех героев из справочной БД в память для избежания
+    повторных запросов при анализе. Кэш представляет собой словарь
+    формата {hero_id: localized_name}.
 
     Returns:
-        bool: True если кэш успешно загружен, False в случае ошибки
+        bool: True если кэш успешно загружен, False при ошибке
 
     Raises:
         Exception: При ошибках подключения к БД или отсутствии данных
+
+    Note:
+        Функция обязательна для корректной работы анализа датасета
     """
     global HEROES_CACHE
 
@@ -82,20 +100,21 @@ def get_hero_name_by_id(hero_id: int) -> str:
         hero_id (int): Уникальный идентификатор героя
 
     Returns:
-        str: Локализованное название героя или "Unknown Hero (ID: X)" если не найден
+        str: Локализованное название героя или "Unknown Hero (ID: X)"
     """
     return HEROES_CACHE.get(hero_id, f"Unknown Hero (ID: {hero_id})")
 
 
 def format_timestamp_to_readable_date(timestamp: int) -> str:
     """
-    Конвертирует Unix timestamp в читаемую дату и время
+    Конвертирует Unix timestamp в читаемую дату и время.
 
     Args:
-        timestamp: Unix timestamp
+        timestamp (int): Unix timestamp в секундах
 
     Returns:
-        Отформатированная строка даты и времени
+        str: Отформатированная строка даты в формате 'YYYY-MM-DD HH:MM:SS'
+             или сообщение об ошибке для некорректных timestamp
     """
     try:
         return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
@@ -103,29 +122,134 @@ def format_timestamp_to_readable_date(timestamp: int) -> str:
         return f"Invalid timestamp: {timestamp}"
 
 
-def validate_database_integrity(session) -> list:
+def get_database_info(session) -> dict:
     """
-    Выполняет комплексную проверку целостности и валидности данных в базе
+    Получает информацию о размере и весе датасета из PostgreSQL.
 
-    Проверяет:
-    - Уникальность ключевых полей (match_id, match_seq_num)
+    Извлекает метаинформацию о базе данных, включая:
+    - Название текущей базы данных
+    - Общий размер БД в читаемом формате
+    - Количество записей в основных таблицах
+    - Размеры отдельных таблиц
+
+    Args:
+        session: Сессия SQLAlchemy для работы с БД
+
+    Returns:
+        dict: Словарь с информацией о БД, содержащий:
+            - db_name (str): Название базы данных
+            - total_size (str): Общий размер в читаемом формате
+            - matches_count (int): Количество матчей
+            - players_count (int): Количество записей игроков
+            - matches_table_size (str): Размер таблицы матчей
+            - players_table_size (str): Размер таблицы игроков
+
+    Note:
+        При ошибках PostgreSQL-специфичных запросов возвращает fallback
+        с базовыми счетчиками записей
+    """
+    try:
+        # Получаем название текущей БД
+        db_name = session.execute(text("SELECT current_database()")).scalar()
+
+        # Получаем размер БД в байтах
+        size_query = text("SELECT pg_database_size(current_database())")
+        db_size_bytes = session.execute(size_query).scalar()
+
+        # Конвертируем в читаемый формат
+        if db_size_bytes > 1024 ** 3:  # GB
+            db_size_readable = f"{db_size_bytes / (1024 ** 3):.1f} GB"
+        elif db_size_bytes > 1024 ** 2:  # MB
+            db_size_readable = f"{db_size_bytes / (1024 ** 2):.1f} MB"
+        else:  # KB
+            db_size_readable = f"{db_size_bytes / 1024:.1f} KB"
+
+        # Получаем количество записей
+        matches_count = session.query(func.count(Match.match_id)).scalar()
+        players_count = session.query(func.count(MatchPlayer.id)).scalar()
+
+        # Получаем размеры отдельных таблиц
+        matches_table_size = session.execute(text("SELECT pg_total_relation_size('matches')")).scalar()
+        players_table_size = session.execute(text("SELECT pg_total_relation_size('match_players')")).scalar()
+
+        matches_size_readable = f"{matches_table_size / (1024 ** 2):.1f} MB" if matches_table_size > 1024 ** 2 else f"{matches_table_size / 1024:.1f} KB"
+        players_size_readable = f"{players_table_size / (1024 ** 2):.1f} MB" if players_table_size > 1024 ** 2 else f"{players_table_size / 1024:.1f} KB"
+
+        return {
+            'db_name': db_name,
+            'total_size': db_size_readable,
+            'matches_count': matches_count,
+            'players_count': players_count,
+            'matches_table_size': matches_size_readable,
+            'players_table_size': players_size_readable
+        }
+    except Exception as e:
+        print_status_message(f"Не удалось получить информацию о размере БД: {e}", "warning")
+        # Fallback - только подсчет записей
+        matches_count = session.query(func.count(Match.match_id)).scalar()
+        players_count = session.query(func.count(MatchPlayer.id)).scalar()
+        return {
+            'db_name': 'dota_rate_dataset',
+            'total_size': 'Неизвестно',
+            'matches_count': matches_count,
+            'players_count': players_count,
+            'matches_table_size': 'Неизвестно',
+            'players_table_size': 'Неизвестно'
+        }
+
+
+def display_database_info(db_info):
+    """
+    Отображает информацию о весе и размере датасета.
+
+    Выводит структурированную информацию о состоянии базы данных,
+    включая количество записей, размеры таблиц и общий вес.
+
+    Args:
+        db_info (dict): Словарь с информацией о БД из get_database_info()
+    """
+    print_section_header("ВЕС И РАЗМЕР ДАТАСЕТА", "⚖️", color=Colors.BRIGHT_CYAN)
+
+    print_info_line("База данных", db_info['db_name'], "🗃️", Colors.BRIGHT_WHITE, Colors.BRIGHT_BLUE)
+    print_info_line("Количество матчей", f"{db_info['matches_count']:,}", "🎮", Colors.BRIGHT_WHITE,
+                    Colors.BRIGHT_YELLOW)
+    print_info_line("Количество записей игроков", f"{db_info['players_count']:,}", "👥", Colors.BRIGHT_WHITE,
+                    Colors.BRIGHT_CYAN)
+
+    print()
+    print_info_line("Фактический размер БД", db_info['total_size'], "💾", Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN)
+    if db_info['matches_table_size'] != 'Неизвестно':
+        print_info_line("Размер таблицы матчей", db_info['matches_table_size'], "📊", Colors.BRIGHT_WHITE,
+                        Colors.BRIGHT_PURPLE)
+        print_info_line("Размер таблицы игроков", db_info['players_table_size'], "📈", Colors.BRIGHT_WHITE,
+                        Colors.BRIGHT_ORANGE)
+
+
+def validate_data(session) -> list:
+    """
+    Выполняет комплексную проверку целостности и валидности данных в базе.
+
+    Проводит серию проверок для выявления потенциальных проблем:
+    - Уникальность ключевых идентификаторов (match_id, match_seq_num)
     - Отсутствие NULL значений в критических полях
-    - Корректность значений ролей и номеров команд
-    - Правильное количество игроков в матчах (10 игроков)
+    - Корректность значений ролей (core/support)
+    - Правильность номеров команд (0/1)
+    - Количество игроков в матчах (должно быть 10)
     - Связность данных между таблицами
 
     Args:
         session: Сессия SQLAlchemy для работы с БД
 
     Returns:
-        Список строк с описанием найденных проблем целостности
+        list: Список строк с описанием найденных проблем.
+              Пустой список означает отсутствие проблем
     """
-    print_section_header("ПРОВЕРКА ЦЕЛОСТНОСТИ И ВАЛИДНОСТИ ДАННЫХ", "🔍", color=Colors.BRIGHT_CYAN)
-
     integrity_issues = []
 
+    print_section_header("ПРОВЕРКА ЦЕЛОСТНОСТИ И ВАЛИДНОСТИ ДАННЫХ", "🔍", color=Colors.BRIGHT_CYAN)
+
     # === ПРОВЕРКА УНИКАЛЬНОСТИ MATCH_ID ===
-    print_info_line("Проверка уникальности", "match_id", "🔍", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
+    print_info_line("Проверка уникальности", "match_id", "🔎", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
     duplicate_match_ids = session.query(Match.match_id, func.count(Match.match_id).label('count')) \
         .group_by(Match.match_id) \
         .having(func.count(Match.match_id) > 1) \
@@ -133,17 +257,17 @@ def validate_database_integrity(session) -> list:
 
     if duplicate_match_ids:
         print_status_message(f"Найдены дублирующиеся match_id: {len(duplicate_match_ids)}", "error")
-        for match_id, count in duplicate_match_ids[:10]:
+        for match_id, count in duplicate_match_ids[:DUPLICATE_DISPLAY_LIMIT]:
             print_info_line(f"Match ID {match_id}", f"{count} дубликатов", "⚠️", Colors.BRIGHT_WHITE, Colors.BRIGHT_RED)
-        if len(duplicate_match_ids) > 10:
-            print_info_line("И еще", f"{len(duplicate_match_ids) - 10} дубликатов", "⚠️", Colors.BRIGHT_WHITE,
-                            Colors.BRIGHT_RED)
+        if len(duplicate_match_ids) > DUPLICATE_DISPLAY_LIMIT:
+            print_info_line("И еще", f"{len(duplicate_match_ids) - DUPLICATE_DISPLAY_LIMIT} дубликатов", "⚠️",
+                            Colors.BRIGHT_WHITE, Colors.BRIGHT_RED)
         integrity_issues.append(f"Дублирующиеся match_id: {len(duplicate_match_ids)}")
     else:
         print_status_message("Все match_id уникальны", "success")
 
     # === ПРОВЕРКА УНИКАЛЬНОСТИ MATCH_SEQ_NUM ===
-    print_info_line("Проверка уникальности", "match_seq_num", "🔍", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
+    print_info_line("Проверка уникальности", "match_seq_num", "🔎", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
     duplicate_sequence_numbers = session.query(Match.match_seq_num, func.count(Match.match_seq_num).label('count')) \
         .group_by(Match.match_seq_num) \
         .having(func.count(Match.match_seq_num) > 1) \
@@ -151,14 +275,14 @@ def validate_database_integrity(session) -> list:
 
     if duplicate_sequence_numbers:
         print_status_message(f"Найдены дублирующиеся match_seq_num: {len(duplicate_sequence_numbers)}", "error")
-        for seq_num, count in duplicate_sequence_numbers[:10]:
+        for seq_num, count in duplicate_sequence_numbers[:DUPLICATE_DISPLAY_LIMIT]:
             print_info_line(f"Seq Num {seq_num}", f"{count} дубликатов", "⚠️", Colors.BRIGHT_WHITE, Colors.BRIGHT_RED)
         integrity_issues.append(f"Дублирующиеся match_seq_num: {len(duplicate_sequence_numbers)}")
     else:
         print_status_message("Все match_seq_num уникальны", "success")
 
     # === ПРОВЕРКА NULL ЗНАЧЕНИЙ В ТАБЛИЦЕ MATCH ===
-    print_info_line("Проверка NULL значений", "таблица Match", "🔍", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
+    print_info_line("Проверка NULL значений", "таблица Match", "🔎", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
     critical_match_fields = [
         ('match_id', session.query(Match).filter(Match.match_id.is_(None)).count()),
         ('match_seq_num', session.query(Match).filter(Match.match_seq_num.is_(None)).count()),
@@ -177,7 +301,7 @@ def validate_database_integrity(session) -> list:
         print_status_message("Нет NULL значений в критических полях Match", "success")
 
     # === ПРОВЕРКА NULL ЗНАЧЕНИЙ В ТАБЛИЦЕ MATCHPLAYER ===
-    print_info_line("Проверка NULL значений", "таблица MatchPlayer", "🔍", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
+    print_info_line("Проверка NULL значений", "таблица MatchPlayer", "🔎", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
     critical_player_fields = [
         ('match_id', session.query(MatchPlayer).filter(MatchPlayer.match_id.is_(None)).count()),
         ('account_id', session.query(MatchPlayer).filter(MatchPlayer.account_id.is_(None)).count()),
@@ -196,7 +320,7 @@ def validate_database_integrity(session) -> list:
         print_status_message("Нет NULL значений в критических полях MatchPlayer", "success")
 
     # === ПРОВЕРКА КОРРЕКТНОСТИ РОЛЕЙ ===
-    print_info_line("Проверка корректности", "ролей игроков", "🔍", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
+    print_info_line("Проверка корректности", "ролей игроков", "🔎", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
     invalid_roles = session.query(MatchPlayer.role, func.count(MatchPlayer.role)) \
         .filter(~MatchPlayer.role.in_(['core', 'support'])) \
         .group_by(MatchPlayer.role) \
@@ -211,7 +335,7 @@ def validate_database_integrity(session) -> list:
         print_status_message("Все роли корректны (core/support)", "success")
 
     # === ПРОВЕРКА КОРРЕКТНОСТИ НОМЕРОВ КОМАНД ===
-    print_info_line("Проверка корректности", "team_number", "🔍", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
+    print_info_line("Проверка корректности", "team_number", "🔎", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
     invalid_team_numbers = session.query(MatchPlayer.team_number, func.count(MatchPlayer.team_number)) \
         .filter(~MatchPlayer.team_number.in_([0, 1])) \
         .group_by(MatchPlayer.team_number) \
@@ -226,13 +350,13 @@ def validate_database_integrity(session) -> list:
         print_status_message("Все team_number корректны (0/1)", "success")
 
     # === ПРОВЕРКА КОЛИЧЕСТВА ИГРОКОВ В МАТЧАХ ===
-    print_info_line("Проверка количества", "игроков в матчах", "🔍", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
+    print_info_line("Проверка количества", "игроков в матчах", "🔎", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
     matches_with_wrong_player_count = session.query(
         MatchPlayer.match_id,
         func.count(MatchPlayer.id).label('player_count')
     ).group_by(MatchPlayer.match_id) \
         .having(func.count(MatchPlayer.id) != 10) \
-        .limit(10).all()
+        .limit(DUPLICATE_DISPLAY_LIMIT).all()
 
     if matches_with_wrong_player_count:
         total_wrong_matches = session.query(MatchPlayer.match_id) \
@@ -246,10 +370,13 @@ def validate_database_integrity(session) -> list:
     else:
         print_status_message("Все матчи содержат 10 игроков", "success")
 
-    # === ПРОВЕРКА СВЯЗНОСТИ ДАННЫХ (ORPHANED RECORDS) ===
-    print_info_line("Проверка связности", "данных", "🔍", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
+    # === ПРОВЕРКА СВЯЗНОСТИ ДАННЫХ ===
+    print_info_line("Проверка связности", "данных", "🔎", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
+
+    # Поиск записей игроков без соответствующих матчей (orphaned records)
     orphaned_players_count = session.query(func.count(MatchPlayer.id)) \
-        .filter(~MatchPlayer.match_id.in_(session.query(Match.match_id))) \
+        .outerjoin(Match, MatchPlayer.match_id == Match.match_id) \
+        .filter(Match.match_id.is_(None)) \
         .scalar()
 
     if orphaned_players_count > 0:
@@ -271,133 +398,89 @@ def validate_database_integrity(session) -> list:
     return integrity_issues
 
 
-def analyze_match_statistics(session):
+def analyze_match_data(session):
     """
-    Проводит комплексный анализ статистики матчей
+    Анализирует статистику матчей с диапазонами и структурами.
 
-    Анализирует:
-    - Общее количество матчей и временные диапазоны
-    - Диапазоны основных полей (ID, sequence numbers, время)
-    - Длительность матчей (мин/макс/среднее)
-    - Статистику побед по сторонам (Radiant vs Dire)
+    Проводит комплексный анализ данных матчей, включая:
+    - Отображение временных диапазонов и sequence numbers
+    - Анализ длительности матчей (мин/макс/среднее)
+    - Статистику побед по командам (баланс)
     - Распределение по игровым режимам
-    - Типы лобби
+    - Анализ типов лобби
     - Статистику счета команд
-    - Детальный анализ разрушенных структур (башни и казармы)
+    - Детальный анализ разрушения игровых структур
 
     Args:
         session: Сессия SQLAlchemy для работы с БД
     """
     print_section_header("СТАТИСТИКА МАТЧЕЙ", "📊", color=Colors.BRIGHT_MAGENTA)
 
-    # === ОБЩАЯ ИНФОРМАЦИЯ О МАТЧАХ ===
     total_matches = session.query(func.count(Match.match_id)).scalar()
-    print_info_line("Общее количество матчей", f"{total_matches:,}", "📈", Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN)
-
     if total_matches == 0:
         print_status_message("Нет данных для анализа", "error")
         return
 
-    # === ДИАПАЗОНЫ ОСНОВНЫХ ПОЛЕЙ ===
-    print_subsection_header("Диапазоны основных полей", "🔢", Colors.BRIGHT_BLUE)
+    # === ОТОБРАЖЕНИЕ ДИАПАЗОНОВ ВРЕМЕНИ И ID ===
+    _display_data_ranges(session)
 
-    # Получаем граничные матчи по порядку сбора (sequence number)
-    first_match_by_sequence = session.query(Match).order_by(Match.match_seq_num.asc()).first()
-    last_match_by_sequence = session.query(Match).order_by(Match.match_seq_num.desc()).first()
-
-    # Получаем статистику диапазонов всех полей
-    range_statistics = session.query(
-        func.min(Match.match_id).label('min_match_id'),
-        func.max(Match.match_id).label('max_match_id'),
-        func.min(Match.match_seq_num).label('min_seq'),
-        func.max(Match.match_seq_num).label('max_seq'),
-        func.min(Match.start_time).label('min_time'),
-        func.max(Match.start_time).label('max_time')
-    ).first()
-
-    if first_match_by_sequence and last_match_by_sequence and range_statistics:
-        # Граничные в БД (по порядку сбора)
-        print_info_line("Sequence Number (граничные)",
-                        f"{first_match_by_sequence.match_seq_num:,} - {last_match_by_sequence.match_seq_num:,}",
-                        "🔢", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
-        print_info_line("Match ID (граничные)",
-                        f"{first_match_by_sequence.match_id:,} - {last_match_by_sequence.match_id:,}",
-                        "🆔", Colors.BRIGHT_WHITE, Colors.BRIGHT_CYAN)
-
-        first_date = format_timestamp_to_readable_date(first_match_by_sequence.start_time)
-        last_date = format_timestamp_to_readable_date(last_match_by_sequence.start_time)
-        print_info_line("Время (граничные)", f"{first_date} - {last_date}", "🕐", Colors.BRIGHT_WHITE,
-                        Colors.BRIGHT_PURPLE)
-
-        # Минимальные и максимальные значения
-        print_info_line("Sequence Number (мин/макс)",
-                        f"{range_statistics.min_seq:,} - {range_statistics.max_seq:,}",
-                        "🔢", Colors.BRIGHT_WHITE, Colors.BRIGHT_ORANGE)
-        print_info_line("Match ID (мин/макс)",
-                        f"{range_statistics.min_match_id:,} - {range_statistics.max_match_id:,}",
-                        "🆔", Colors.BRIGHT_WHITE, Colors.BRIGHT_PINK)
-
-        min_date = format_timestamp_to_readable_date(range_statistics.min_time)
-        max_date = format_timestamp_to_readable_date(range_statistics.max_time)
-        print_info_line("Время (мин/макс)", f"{min_date} - {max_date}", "🕐", Colors.BRIGHT_WHITE, Colors.BRIGHT_LIME)
-    else:
-        print_status_message("Не удалось получить данные о диапазонах", "error")
-
-    # === АНАЛИЗ ДЛИТЕЛЬНОСТИ МАТЧЕЙ ===
-    duration_statistics = session.query(
+    # === СТАТИСТИКА ДЛИТЕЛЬНОСТИ МАТЧЕЙ ===
+    duration_stats = session.query(
         func.min(Match.duration).label('min_duration'),
         func.max(Match.duration).label('max_duration'),
         func.avg(Match.duration).label('avg_duration')
     ).first()
 
-    min_time_str = f"{duration_statistics.min_duration // 60}:{duration_statistics.min_duration % 60:02d}"
-    max_time_str = f"{duration_statistics.max_duration // 60}:{duration_statistics.max_duration % 60:02d}"
-    avg_time_str = f"{int(duration_statistics.avg_duration) // 60}:{int(duration_statistics.avg_duration) % 60:02d}"
+    # Конвертируем секунды в формат MM:SS для читаемости
+    min_time_str = f"{duration_stats.min_duration // 60}:{duration_stats.min_duration % 60:02d}"
+    max_time_str = f"{duration_stats.max_duration // 60}:{duration_stats.max_duration % 60:02d}"
+    avg_time_str = f"{int(duration_stats.avg_duration) // 60}:{int(duration_stats.avg_duration) % 60:02d}"
 
+    print()
     print_info_line("Длительность матчей", f"{min_time_str} - {max_time_str} (среднее: {avg_time_str})",
                     "⏱️", Colors.BRIGHT_WHITE, Colors.BRIGHT_TEAL)
 
     # === СТАТИСТИКА ПОБЕД ===
     print_subsection_header("Статистика побед", "🏆", Colors.BRIGHT_GREEN)
-    win_statistics = session.query(
+    win_stats = session.query(
         Match.radiant_win,
         func.count(Match.radiant_win).label('count')
     ).group_by(Match.radiant_win).all()
 
-    for is_radiant_win, count in win_statistics:
+    for is_radiant_win, count in win_stats:
         side_name = "Radiant" if is_radiant_win else "Dire"
         side_emoji = "🌅" if is_radiant_win else "🌙"
         percentage = (count / total_matches) * 100
         print_info_line(f"{side_name} побед", f"{count:,} ({percentage:.1f}%)", side_emoji,
                         Colors.BRIGHT_WHITE, Colors.BRIGHT_GOLD)
 
-    # === АНАЛИЗ ИГРОВЫХ РЕЖИМОВ ===
+    # === СТАТИСТИКА ИГРОВЫХ РЕЖИМОВ ===
     print_subsection_header("Режимы игры", "🎮", Colors.BRIGHT_PURPLE)
-    game_mode_statistics = session.query(
+    game_mode_stats = session.query(
         Match.game_mode,
         func.count(Match.game_mode).label('count')
     ).group_by(Match.game_mode).order_by(func.count(Match.game_mode).desc()).all()
 
-    for mode, count in game_mode_statistics:
+    for mode, count in game_mode_stats:
         percentage = (count / total_matches) * 100
         print_info_line(f"Режим {mode}", f"{count:,} ({percentage:.1f}%)", "🎯",
                         Colors.BRIGHT_WHITE, Colors.BRIGHT_CORAL)
 
-    # === АНАЛИЗ ТИПОВ ЛОББИ ===
-    print_subsection_header("Типы лобби", "🏠", Colors.BRIGHT_ORANGE)
-    lobby_statistics = session.query(
+    # === СТАТИСТИКА ТИПОВ ЛОББИ ===
+    print_subsection_header("Типы лобби", "🛏️", Colors.BRIGHT_ORANGE)
+    lobby_stats = session.query(
         Match.lobby_type,
         func.count(Match.lobby_type).label('count')
     ).group_by(Match.lobby_type).order_by(func.count(Match.lobby_type).desc()).all()
 
-    for lobby, count in lobby_statistics:
+    for lobby, count in lobby_stats:
         percentage = (count / total_matches) * 100
         print_info_line(f"Лобби {lobby}", f"{count:,} ({percentage:.1f}%)", "🛠️",
                         Colors.BRIGHT_WHITE, Colors.BRIGHT_MINT)
 
     # === СТАТИСТИКА СЧЕТА КОМАНД ===
     print_subsection_header("Статистика счета", "🎯", Colors.BRIGHT_YELLOW)
-    score_statistics = session.query(
+    score_stats = session.query(
         func.min(Match.radiant_score).label('min_rad'),
         func.max(Match.radiant_score).label('max_rad'),
         func.avg(Match.radiant_score).label('avg_rad'),
@@ -407,90 +490,147 @@ def analyze_match_statistics(session):
     ).first()
 
     print_info_line("Radiant счет",
-                    f"{score_statistics.min_rad} - {score_statistics.max_rad} (среднее: {score_statistics.avg_rad:.1f})",
+                    f"{score_stats.min_rad} - {score_stats.max_rad} (среднее: {score_stats.avg_rad:.1f})",
                     "🌅", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
     print_info_line("Dire счет",
-                    f"{score_statistics.min_dire} - {score_statistics.max_dire} (среднее: {score_statistics.avg_dire:.1f})",
+                    f"{score_stats.min_dire} - {score_stats.max_dire} (среднее: {score_stats.avg_dire:.1f})",
                     "🌙", Colors.BRIGHT_WHITE, Colors.BRIGHT_LAVENDER)
 
-    # === ДЕТАЛЬНЫЙ АНАЛИЗ СТРУКТУР ===
-    _analyze_match_structures(session, total_matches)
+    # === СТАТИСТИКА СТРУКТУР ===
+    _analyze_game_structures(session, total_matches)
 
 
-def _analyze_match_structures(session, total_matches: int):
+def _display_data_ranges(session):
     """
-    Анализирует статистику разрушения башен и казарм в матчах
+    Отображает диапазоны основных полей с улучшенной читаемостью.
 
-    Использует битовые маски для определения состояния структур:
-    - Для башен: 11 бит (по количеству башен на карте)
-    - Для казарм: 6 бит (по количеству казарм на карте)
-    - Бит = 1: структура стоит, бит = 0: структура уничтожена
+    Показывает подробную информацию о:
+    - Порядке сбора данных (по sequence numbers)
+    - Временном диапазоне матчей
+    - Полных диапазонах всех ключевых полей
 
     Args:
         session: Сессия SQLAlchemy для работы с БД
-        total_matches: Общее количество матчей для расчета процентов
     """
-    print_subsection_header("Статистика структур", "🗼", Colors.BRIGHT_TEAL)
+    print_subsection_header("Диапазоны основных полей", "🔢", Colors.BRIGHT_BLUE)
+
+    # Получаем граничные матчи по порядку сбора
+    first_match_by_sequence = session.query(Match).order_by(Match.match_seq_num.asc()).first()
+    last_match_by_sequence = session.query(Match).order_by(Match.match_seq_num.desc()).first()
+
+    # Получаем статистику диапазонов всех полей
+    range_stats = session.query(
+        func.min(Match.match_id).label('min_match_id'),
+        func.max(Match.match_id).label('max_match_id'),
+        func.min(Match.match_seq_num).label('min_seq'),
+        func.max(Match.match_seq_num).label('max_seq'),
+        func.min(Match.start_time).label('min_time'),
+        func.max(Match.start_time).label('max_time')
+    ).first()
+
+    if first_match_by_sequence and last_match_by_sequence and range_stats:
+        print(f"{Colors.BRIGHT_WHITE}📊 По порядку сбора данных (sequence):{Colors.RESET}")
+        print(
+            f"    ├─ Первый матч:  Seq {Colors.BRIGHT_YELLOW}{first_match_by_sequence.match_seq_num:,}{Colors.RESET} | Match ID {Colors.BRIGHT_CYAN}{first_match_by_sequence.match_id:,}{Colors.RESET}")
+        print(
+            f"    └─ Последний:    Seq {Colors.BRIGHT_YELLOW}{last_match_by_sequence.match_seq_num:,}{Colors.RESET} | Match ID {Colors.BRIGHT_CYAN}{last_match_by_sequence.match_id:,}{Colors.RESET}")
+
+        # Вычисляем разницу для понимания охвата данных
+        seq_diff = last_match_by_sequence.match_seq_num - first_match_by_sequence.match_seq_num
+        match_id_diff = last_match_by_sequence.match_id - first_match_by_sequence.match_id
+
+        print(
+            f"    📏 Диапазон:     Seq {Colors.BRIGHT_GREEN}{seq_diff:,}{Colors.RESET} | Match ID {Colors.BRIGHT_GREEN}{match_id_diff:,}{Colors.RESET}")
+        print()
+
+        print(f"{Colors.BRIGHT_WHITE}🕐 Временной диапазон:{Colors.RESET}")
+        first_date = format_timestamp_to_readable_date(first_match_by_sequence.start_time)
+        last_date = format_timestamp_to_readable_date(last_match_by_sequence.start_time)
+        print(f"    ├─ Начало:  {Colors.BRIGHT_PURPLE}{first_date}{Colors.RESET}")
+        print(f"    └─ Конец:   {Colors.BRIGHT_PURPLE}{last_date}{Colors.RESET}")
+
+        # Вычисляем временную разницу для анализа периода
+        time_diff_hours = (last_match_by_sequence.start_time - first_match_by_sequence.start_time) / 3600
+        if time_diff_hours >= 24:
+            time_diff_days = time_diff_hours / 24
+            print(
+                f"    📅 Период:  {Colors.BRIGHT_GREEN}{time_diff_days:.1f} дней{Colors.RESET} ({time_diff_hours:.1f} часов)")
+        else:
+            print(f"    📅 Период:  {Colors.BRIGHT_GREEN}{time_diff_hours:.1f} часов{Colors.RESET}")
+        print()
+
+        print(f"{Colors.BRIGHT_WHITE}📋 Полные диапазоны (мин-макс):{Colors.RESET}")
+        print(
+            f"    ├─ Sequence:    {Colors.BRIGHT_YELLOW}{range_stats.min_seq:,}{Colors.RESET} → {Colors.BRIGHT_YELLOW}{range_stats.max_seq:,}{Colors.RESET}")
+        print(
+            f"    ├─ Match ID:    {Colors.BRIGHT_CYAN}{range_stats.min_match_id:,}{Colors.RESET} → {Colors.BRIGHT_CYAN}{range_stats.max_match_id:,}{Colors.RESET}")
+
+        min_date = format_timestamp_to_readable_date(range_stats.min_time)
+        max_date = format_timestamp_to_readable_date(range_stats.max_time)
+        print(f"    └─ Время:       {Colors.BRIGHT_PURPLE}{min_date}{Colors.RESET}")
+        print(f"                    {Colors.BRIGHT_PURPLE}{max_date}{Colors.RESET}")
+
+
+def _analyze_game_structures(session, total_matches: int):
+    """
+    Анализирует статистику разрушения башен и казарм в матчах.
+
+    Проводит подробный анализ состояния игровых структур:
+    - Статистику разрушения каждой башни по типам и уровням
+    - Анализ уничтожения казарм по линиям
+    - Расчет среднего количества уничтоженных структур
+
+    Использует битовые операции для интерпретации статусов структур:
+    - Бит = 1: структура цела
+    - Бит = 0: структура уничтожена
+
+    Args:
+        session: Сессия SQLAlchemy для работы с БД
+        total_matches (int): Общее количество матчей для расчета процентов
+
+    Note:
+        Анализ основан на битовых масках TOWERS_BITMASK и BARRACKS_BITMASK из config.
+        Порядок битов соответствует игровой логике Dota 2 из документации Steam API.
+    """
 
     # Определяем структуры для анализа в правильном порядке
     tower_names = [
         # Tier 1 башни
-        "Top Tier 1", "Middle Tier 1", "Bottom Tier 1",
+        "Tier 1 Top", "Tier 1 Middle", "Tier 1 Bottom",
         # Tier 2 башни
-        "Top Tier 2", "Middle Tier 2", "Bottom Tier 2",
+        "Tier 2 Top", "Tier 2 Middle", "Tier 2 Bottom",
         # Tier 3 башни
-        "Top Tier 3", "Middle Tier 3", "Bottom Tier 3",
+        "Tier 3 Top", "Tier 3 Middle", "Tier 3 Bottom",
         # Ancient башни
         "Ancient Top", "Ancient Bottom"
     ]
 
-    # Соответствующие битовые позиции для башен (новый порядок)
-    tower_bit_positions = [
-        # Tier 1 (позиции 0, 3, 6)
-        0, 3, 6,
-        # Tier 2 (позиции 1, 4, 7)
-        1, 4, 7,
-        # Tier 3 (позиции 2, 5, 8)
-        2, 5, 8,
-        # Ancient (позиции 9, 10)
-        9, 10
-    ]
+    # Соответствующие битовые позиции для башен (согласно Dota 2 API)
+    tower_bit_positions = [0, 3, 6, 1, 4, 7, 2, 5, 8, 9, 10]
 
     barracks_names = [
-        "Top Melee", "Top Ranged", "Middle Melee",
-        "Middle Ranged", "Bottom Melee", "Bottom Ranged"
+        "Top Melee", "Top Ranged",
+        "Middle Melee", "Middle Ranged",
+        "Bottom Melee", "Bottom Ranged"
     ]
 
-    # Получаем все записи матчей для анализа структур
-    matches_structure_data = session.query(
-        Match.tower_status_radiant,
-        Match.tower_status_dire,
-        Match.barracks_status_radiant,
-        Match.barracks_status_dire
-    ).all()
-
-    total_matches_with_structure_data = len(matches_structure_data)
-
-    if total_matches_with_structure_data > 0:
+    if total_matches > 0:
         # === АНАЛИЗ БАШЕН ===
-        print_subsection_header("Анализ башен (битовые маски)", "🗼", Colors.BRIGHT_BLUE)
+        print_subsection_header("Статистика уничтожения башен", "🗼", Colors.BRIGHT_BLUE)
 
         # Подсчет уничтоженных башен для каждой команды
-        for team_name, tower_field_index in [("Radiant", 0), ("Dire", 1)]:
+        for team_name, tower_field in [("Radiant", "tower_status_radiant"), ("Dire", "tower_status_dire")]:
             team_emoji = "🌅" if team_name == "Radiant" else "🌙"
             print(f"\n{team_emoji} {Colors.BOLD}{team_name}:{Colors.RESET}")
 
             for tower_name, bit_position in zip(tower_names, tower_bit_positions):
-                destroyed_count = 0
-                for match in matches_structure_data:
-                    tower_status = match[tower_field_index]  # 0 для radiant, 1 для dire
-                    # Если бит установлен в 1, то башня ЕЩЕ СТОИТ
-                    # Если бит 0, то башня УНИЧТОЖЕНА
-                    if not (tower_status & (1 << bit_position)):
-                        destroyed_count += 1
+                # Башня уничтожена если бит в позиции bit_position равен 0
+                destroyed_count = session.query(func.count(Match.match_id)).filter(
+                    func.coalesce(getattr(Match, tower_field), 0).op('&')(1 << bit_position) == 0
+                ).scalar()
 
-                destroyed_percentage = (destroyed_count / total_matches_with_structure_data) * 100
-                standing_count = total_matches_with_structure_data - destroyed_count
+                destroyed_percentage = (destroyed_count / total_matches) * 100
+                standing_count = total_matches - destroyed_count
                 standing_percentage = 100 - destroyed_percentage
 
                 print_info_line(tower_name,
@@ -499,23 +639,20 @@ def _analyze_match_structures(session, total_matches: int):
                                 Colors.BRIGHT_RED if destroyed_percentage > 50 else Colors.BRIGHT_GREEN)
 
         # === АНАЛИЗ КАЗАРМ ===
-        print_subsection_header("Анализ казарм (битовые маски)", "🏰", Colors.BRIGHT_GREEN)
+        print_subsection_header("Статистика уничтожения казарм", "🏰", Colors.BRIGHT_GREEN)
 
-        for team_name, barracks_field_index in [("Radiant", 2), ("Dire", 3)]:
+        for team_name, barracks_field in [("Radiant", "barracks_status_radiant"), ("Dire", "barracks_status_dire")]:
             team_emoji = "🌅" if team_name == "Radiant" else "🌙"
             print(f"\n{team_emoji} {Colors.BOLD}{team_name}:{Colors.RESET}")
 
             for bit_position, barracks_name in enumerate(barracks_names):
-                destroyed_count = 0
-                for match in matches_structure_data:
-                    barracks_status = match[barracks_field_index]  # 2 для radiant, 3 для dire
-                    # Если бит установлен в 1, то казарма ЕЩЕ СТОИТ
-                    # Если бит 0, то казарма УНИЧТОЖЕНА
-                    if not (barracks_status & (1 << bit_position)):
-                        destroyed_count += 1
+                # Казарма уничтожена если бит в позиции bit_position равен 0
+                destroyed_count = session.query(func.count(Match.match_id)).filter(
+                    func.coalesce(getattr(Match, barracks_field), 0).op('&')(1 << bit_position) == 0
+                ).scalar()
 
-                destroyed_percentage = (destroyed_count / total_matches_with_structure_data) * 100
-                standing_count = total_matches_with_structure_data - destroyed_count
+                destroyed_percentage = (destroyed_count / total_matches) * 100
+                standing_count = total_matches - destroyed_count
                 standing_percentage = 100 - destroyed_percentage
 
                 print_info_line(barracks_name,
@@ -524,72 +661,91 @@ def _analyze_match_structures(session, total_matches: int):
                                 Colors.BRIGHT_RED if destroyed_percentage > 50 else Colors.BRIGHT_GREEN)
 
         # === ОБЩАЯ СТАТИСТИКА ПО КОЛИЧЕСТВУ УНИЧТОЖЕННЫХ СТРУКТУР ===
-        _calculate_average_structure_destruction(matches_structure_data)
+        _calculate_average_structures_destroyed(session)
 
     else:
         print_status_message("Нет данных о структурах для анализа", "error")
 
 
-def _calculate_average_structure_destruction(matches_structure_data: list):
+def _calculate_average_structures_destroyed(session):
     """
-    Подсчитывает среднее количество уничтоженных башен и казарм для каждой команды
+    Подсчитывает среднее количество уничтоженных башен и казарм.
+
+    Вычисляет статистику разрушений используя битовые операции:
+    - Инвертирует битовые маски (XOR с полной маской)
+    - Подсчитывает единицы в результате (количество уничтоженных структур)
+    - Рассчитывает средние значения по всем матчам
 
     Args:
-        matches_structure_data: Список кортежей с данными о структурах матчей
+        session: Сессия SQLAlchemy для работы с БД
     """
     print_subsection_header("Общая статистика разрушений", "📊", Colors.BRIGHT_PURPLE)
 
-    # Инициализируем списки для подсчета
-    radiant_towers_destroyed = []
-    dire_towers_destroyed = []
-    radiant_barracks_destroyed = []
-    dire_barracks_destroyed = []
+    try:
+        # Загружаем только необходимые поля
+        matches_structure_data = session.query(
+            Match.tower_status_radiant,
+            Match.tower_status_dire,
+            Match.barracks_status_radiant,
+            Match.barracks_status_dire
+        ).all()
 
-    for match in matches_structure_data:
-        # Подсчет уничтоженных башен (инвертируем биты и считаем единицы)
-        # XOR с полной маской дает инвертированное значение
-        radiant_tower_count = bin(match[0] ^ TOWERS_BITMASK).count('1') if match[0] is not None else 0
-        dire_tower_count = bin(match[1] ^ TOWERS_BITMASK).count('1') if match[1] is not None else 0
-        radiant_towers_destroyed.append(radiant_tower_count)
-        dire_towers_destroyed.append(dire_tower_count)
+        # Инициализируем списки для подсчета
+        radiant_towers_destroyed = []
+        dire_towers_destroyed = []
+        radiant_barracks_destroyed = []
+        dire_barracks_destroyed = []
 
-        # Подсчет уничтоженных казарм (инвертируем биты и считаем единицы)
-        radiant_barracks_count = bin(match[2] ^ BARRACKS_BITMASK).count('1') if match[2] is not None else 0
-        dire_barracks_count = bin(match[3] ^ BARRACKS_BITMASK).count('1') if match[3] is not None else 0
-        radiant_barracks_destroyed.append(radiant_barracks_count)
-        dire_barracks_destroyed.append(dire_barracks_count)
+        for match in matches_structure_data:
+            # Подсчет уничтоженных башен (инвертируем биты и считаем единицы)
+            # XOR с полной маской дает нам биты уничтоженных структур
+            radiant_tower_count = bin((match[0] or 0) ^ TOWERS_BITMASK).count('1') if match[0] is not None else 0
+            dire_tower_count = bin((match[1] or 0) ^ TOWERS_BITMASK).count('1') if match[1] is not None else 0
+            radiant_towers_destroyed.append(radiant_tower_count)
+            dire_towers_destroyed.append(dire_tower_count)
 
-    # Вычисляем средние значения
-    avg_radiant_towers = sum(radiant_towers_destroyed) / len(radiant_towers_destroyed)
-    avg_dire_towers = sum(dire_towers_destroyed) / len(dire_towers_destroyed)
-    avg_radiant_barracks = sum(radiant_barracks_destroyed) / len(radiant_barracks_destroyed)
-    avg_dire_barracks = sum(dire_barracks_destroyed) / len(dire_barracks_destroyed)
+            # Подсчет уничтоженных казарм
+            radiant_barracks_count = bin((match[2] or 0) ^ BARRACKS_BITMASK).count('1') if match[2] is not None else 0
+            dire_barracks_count = bin((match[3] or 0) ^ BARRACKS_BITMASK).count('1') if match[3] is not None else 0
+            radiant_barracks_destroyed.append(radiant_barracks_count)
+            dire_barracks_destroyed.append(dire_barracks_count)
 
-    print_info_line("Radiant - Среднее башен уничтожено", f"{avg_radiant_towers:.1f}/11", "🌅",
-                    Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
-    print_info_line("Radiant - Среднее казарм уничтожено", f"{avg_radiant_barracks:.1f}/6", "🌅",
-                    Colors.BRIGHT_WHITE, Colors.BRIGHT_ORANGE)
-    print_info_line("Dire - Среднее башен уничтожено", f"{avg_dire_towers:.1f}/11", "🌙",
-                    Colors.BRIGHT_WHITE, Colors.BRIGHT_CYAN)
-    print_info_line("Dire - Среднее казарм уничтожено", f"{avg_dire_barracks:.1f}/6", "🌙",
-                    Colors.BRIGHT_WHITE, Colors.BRIGHT_MAGENTA)
+        # Вычисляем средние значения
+        if matches_structure_data:
+            avg_radiant_towers = sum(radiant_towers_destroyed) / len(radiant_towers_destroyed)
+            avg_dire_towers = sum(dire_towers_destroyed) / len(dire_towers_destroyed)
+            avg_radiant_barracks = sum(radiant_barracks_destroyed) / len(radiant_barracks_destroyed)
+            avg_dire_barracks = sum(dire_barracks_destroyed) / len(dire_barracks_destroyed)
+
+            print_info_line("Radiant - Среднее башен уничтожено", f"{avg_radiant_towers:.1f}/11", "🌅",
+                            Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
+            print_info_line("Radiant - Среднее казарм уничтожено", f"{avg_radiant_barracks:.1f}/6", "🌅",
+                            Colors.BRIGHT_WHITE, Colors.BRIGHT_ORANGE)
+            print_info_line("Dire - Среднее башен уничтожено", f"{avg_dire_towers:.1f}/11", "🌙",
+                            Colors.BRIGHT_WHITE, Colors.BRIGHT_CYAN)
+            print_info_line("Dire - Среднее казарм уничтожено", f"{avg_dire_barracks:.1f}/6", "🌙",
+                            Colors.BRIGHT_WHITE, Colors.BRIGHT_MAGENTA)
+        else:
+            print_status_message("Нет данных для расчета статистики разрушений", "warning")
+
+    except Exception as e:
+        print_status_message(f"Ошибка при расчете статистики разрушений: {e}", "error")
 
 
-def analyze_player_statistics(session):
+def analyze_player_data(session):
     """
-    Проводит комплексный анализ статистики игроков
+    Анализирует статистику игроков с оптимизированными запросами.
 
-    Анализирует:
-    - Общее количество записей игроков и уникальных аккаунтов
-    - Статистику приватных аккаунтов
-    - KDA статистику (убийства/смерти/помощи)
-    - Статистику по ролям (core vs support)
-    - Топ популярных героев
-    - Винрейт героев (с минимальным количеством игр)
+    Проводит комплексное исследование данных игроков:
+    - Общую информацию о записях и приватных аккаунтах
+    - Анализ боевой статистики (KDA)
+    - Распределение и статистику по ролям
+    - Популярность героев (топ-N)
+    - Винрейт героев с минимальным порогом игр
     - Винрейт героев с учетом вариантов
     - Статистику вариантов героев
-    - Экономическую статистику (GPM, XPM, Last Hits, Net Worth)
-    - Статистику уровней игроков
+    - Экономические показатели (GPM, XPM, net worth)
+    - Детальный анализ уровней игроков
     - Статистику специальных предметов (Aghanim's)
 
     Args:
@@ -607,25 +763,19 @@ def analyze_player_statistics(session):
     # Уникальные игроки исключая приватные аккаунты
     unique_public_players = session.query(func.count(distinct(MatchPlayer.account_id))).filter(
         MatchPlayer.account_id != PRIVATE_ACCOUNT_ID).scalar()
-
-    # Общее количество уникальных account_id (включая приватные)
-    total_unique_accounts = session.query(func.count(distinct(MatchPlayer.account_id))).scalar()
+    private_percentage = (private_accounts_count / total_player_records) * 100 if total_player_records > 0 else 0
 
     print_info_line("Общее количество записей игроков", f"{total_player_records:,}", "📊",
                     Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN)
+    print_info_line("Записей с приватными аккаунтами", f"{private_accounts_count:,} ({private_percentage:.1f}%)", "🔒",
+                    Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
     print_info_line("Уникальных публичных игроков", f"{unique_public_players:,}", "👤",
                     Colors.BRIGHT_WHITE, Colors.BRIGHT_CYAN)
 
-    private_percentage = (private_accounts_count / total_player_records) * 100 if total_player_records > 0 else 0
-    print_info_line("Записей с приватными аккаунтами", f"{private_accounts_count:,} ({private_percentage:.1f}%)", "🔒",
-                    Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
-    print_info_line("Всего уникальных account_id", f"{total_unique_accounts:,} (включая приватные)", "📈",
-                    Colors.BRIGHT_WHITE, Colors.BRIGHT_BLUE)
-
     # Предупреждение о высоком проценте приватных аккаунтов
-    if private_percentage > 10:
+    if private_percentage > PRIVATE_ACCOUNTS_WARNING_THRESHOLD:
         print_status_message(
-            f"Высокий процент приватных аккаунтов ({private_percentage:.1f}%) может влиять на точность анализа уникальных игроков",
+            f"Аномально высокий процент приватных аккаунтов ({private_percentage:.1f}%) может влиять на точность анализа",
             "warning")
 
     if total_player_records == 0:
@@ -648,23 +798,32 @@ def analyze_player_statistics(session):
     _analyze_hero_variant_winrates(session)
 
     # === АНАЛИЗ СТАТИСТИКИ ВАРИАНТОВ ===
-    _analyze_hero_variants_statistics(session, total_player_records)
+    _analyze_hero_variants_stats(session, total_player_records)
 
     # === АНАЛИЗ ЭКОНОМИЧЕСКОЙ СТАТИСТИКИ ===
-    _analyze_economic_statistics(session)
+    _analyze_economic_stats(session)
 
     # === АНАЛИЗ СТАТИСТИКИ УРОВНЕЙ ===
-    _analyze_level_statistics(session, total_player_records)
+    _analyze_level_stats(session, total_player_records)
 
     # === АНАЛИЗ СПЕЦИАЛЬНЫХ ПРЕДМЕТОВ ===
-    _analyze_special_items_statistics(session, total_player_records)
+    _analyze_special_items_stats(session, total_player_records)
 
 
 def _analyze_kda_statistics(session):
-    """Анализирует статистику KDA (убийства/смерти/помощи)"""
+    """
+    Анализирует статистику KDA (убийства/смерти/помощи).
+
+    Рассчитывает основные статистические показатели боевой активности:
+    - Минимальные, максимальные и средние значения kills/deaths/assists
+    - Средний коэффициент KDA по всем игрокам
+
+    Args:
+        session: Сессия SQLAlchemy для работы с БД
+    """
     print_subsection_header("Статистика KDA", "⚔️", Colors.BRIGHT_RED)
 
-    kda_statistics = session.query(
+    kda_stats = session.query(
         func.min(MatchPlayer.kills).label('min_kills'),
         func.max(MatchPlayer.kills).label('max_kills'),
         func.avg(MatchPlayer.kills).label('avg_kills'),
@@ -678,22 +837,33 @@ def _analyze_kda_statistics(session):
     ).first()
 
     print_info_line("Kills",
-                    f"{kda_statistics.min_kills} - {kda_statistics.max_kills} (среднее: {kda_statistics.avg_kills:.1f})",
+                    f"{kda_stats.min_kills} - {kda_stats.max_kills} (среднее: {kda_stats.avg_kills:.1f})",
                     "🗡️", Colors.BRIGHT_WHITE, Colors.BRIGHT_RED)
     print_info_line("Deaths",
-                    f"{kda_statistics.min_deaths} - {kda_statistics.max_deaths} (среднее: {kda_statistics.avg_deaths:.1f})",
+                    f"{kda_stats.min_deaths} - {kda_stats.max_deaths} (среднее: {kda_stats.avg_deaths:.1f})",
                     "💀", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
     print_info_line("Assists",
-                    f"{kda_statistics.min_assists} - {kda_statistics.max_assists} (среднее: {kda_statistics.avg_assists:.1f})",
+                    f"{kda_stats.min_assists} - {kda_stats.max_assists} (среднее: {kda_stats.avg_assists:.1f})",
                     "🤝", Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN)
-    print_info_line("Средний KDA", f"{kda_statistics.avg_kda:.2f}", "📈", Colors.BRIGHT_WHITE, Colors.BRIGHT_BLUE)
+    print_info_line("Средний KDA", f"{kda_stats.avg_kda:.2f}", "📈", Colors.BRIGHT_WHITE, Colors.BRIGHT_BLUE)
 
 
 def _analyze_role_statistics(session, total_player_records: int):
-    """Анализирует статистику игроков по ролям"""
+    """
+    Анализирует статистику игроков по ролям.
+
+    Сравнивает показатели core и support игроков:
+    - Количество и процентное распределение ролей
+    - Средние показатели KDA по ролям
+    - Экономические различия (GPM, XPM, net worth, last hits)
+
+    Args:
+        session: Сессия SQLAlchemy для работы с БД
+        total_player_records (int): Общее количество записей для расчета процентов
+    """
     print_subsection_header("Статистика по ролям", "🎭", Colors.BRIGHT_PURPLE)
 
-    role_statistics = session.query(
+    role_stats = session.query(
         MatchPlayer.role,
         func.count(MatchPlayer.role).label('count'),
         func.avg(MatchPlayer.kills).label('avg_kills'),
@@ -706,7 +876,7 @@ def _analyze_role_statistics(session, total_player_records: int):
         func.avg(MatchPlayer.net_worth).label('avg_nw')
     ).group_by(MatchPlayer.role).all()
 
-    for role_data in role_statistics:
+    for role_data in role_stats:
         role = role_data.role
         count = role_data.count
         percentage = (count / total_player_records) * 100
@@ -723,11 +893,22 @@ def _analyze_role_statistics(session, total_player_records: int):
         print_info_line("GPM | XPM", f"{role_data.avg_gpm:.0f} | {role_data.avg_xpm:.0f}",
                         "💰", Colors.BRIGHT_WHITE, Colors.BRIGHT_GOLD)
         print_info_line("Last Hits | Net Worth", f"{role_data.avg_lh:.0f} | {role_data.avg_nw:.0f}",
-                        "🏹", Colors.BRIGHT_WHITE, Colors.BRIGHT_MINT)
+                        "🹹", Colors.BRIGHT_WHITE, Colors.BRIGHT_MINT)
 
 
 def _analyze_hero_popularity(session, total_player_records: int):
-    """Анализирует популярность героев (топ-20)"""
+    """
+    Анализирует популярность героев (топ-N).
+
+    Показывает наиболее часто выбираемых героев с дополнительной статистикой:
+    - Количество игр и процент от общего числа
+    - Средний KDA для каждого героя
+    - Ранжирование по популярности
+
+    Args:
+        session: Сессия SQLAlchemy для работы с БД
+        total_player_records (int): Общее количество записей для расчета процентов
+    """
     print_subsection_header(f"Топ-{TOP_HEROES_DISPLAY_COUNT} популярных героев", "🦸", Colors.BRIGHT_BLUE)
 
     hero_popularity_stats = session.query(
@@ -752,40 +933,57 @@ def _analyze_hero_popularity(session, total_player_records: int):
 
 
 def _analyze_hero_winrates(session):
-    """Анализирует винрейт героев (топ-20 по винрейту, минимум 100 игр)"""
+    """
+    Анализирует винрейт героев с использованием SQL агрегатных функций.
+
+    Рассчитывает процент побед для каждого героя:
+    - Учитывает команду игрока и результат матча
+    - Применяет минимальный порог игр для статистической значимости
+    - Сортирует по винрейту от высшего к низшему
+
+    Логика определения победы:
+    - Radiant игрок (team_number=0) побеждает если radiant_win=True
+    - Dire игрок (team_number=1) побеждает если radiant_win=False
+
+    Args:
+        session: Сессия SQLAlchemy для работы с БД
+    """
     print_subsection_header(
         f"Топ-{TOP_HEROES_DISPLAY_COUNT} героев по винрейту (мин. {MINIMUM_GAMES_FOR_HERO_WINRATE} игр)", "🏆",
         Colors.BRIGHT_GOLD)
 
     try:
-        # Получаем всех игроков с их матчами для расчета винрейта
-        players_match_results = session.query(
+        # Используем SQL для подсчета винрейта без загрузки всех данных в память
+        hero_winrates = session.query(
             MatchPlayer.hero_id,
-            MatchPlayer.team_number,
-            Match.radiant_win
-        ).join(Match, MatchPlayer.match_id == Match.match_id).all()
+            func.count(MatchPlayer.id).label('total_games'),
+            func.sum(
+                case(
+                    (
+                        ((MatchPlayer.team_number == 0) & (Match.radiant_win == True)) |
+                        ((MatchPlayer.team_number == 1) & (Match.radiant_win == False)),
+                        1
+                    ),
+                    else_=0
+                )
+            ).label('wins')
+        ).join(Match, MatchPlayer.match_id == Match.match_id) \
+            .group_by(MatchPlayer.hero_id) \
+            .having(func.count(MatchPlayer.id) >= MINIMUM_GAMES_FOR_HERO_WINRATE) \
+            .all()
 
-        # Группируем по героям и считаем винрейт
-        hero_winrate_stats = defaultdict(lambda: {'total': 0, 'wins': 0})
-
-        for hero_id, team_number, radiant_win in players_match_results:
-            hero_winrate_stats[hero_id]['total'] += 1
-            # Игрок выиграл если: он в radiant и radiant_win=True ИЛИ он в dire и radiant_win=False
-            if (team_number == 0 and radiant_win) or (team_number == 1 and not radiant_win):
-                hero_winrate_stats[hero_id]['wins'] += 1
-
-        # Фильтруем героев с минимум 100 играми и вычисляем винрейт
-        hero_winrates = []
-        for hero_id, stats in hero_winrate_stats.items():
-            if stats['total'] >= MINIMUM_GAMES_FOR_HERO_WINRATE:
-                winrate = (stats['wins'] * 100.0) / stats['total']
-                hero_winrates.append((hero_id, stats['total'], stats['wins'], winrate))
+        # Вычисляем винрейт и сортируем
+        hero_winrates_with_percentage = []
+        for hero_id, total_games, wins in hero_winrates:
+            winrate = (wins * 100.0) / total_games if total_games > 0 else 0
+            hero_winrates_with_percentage.append((hero_id, total_games, wins, winrate))
 
         # Сортируем по винрейту
-        hero_winrates.sort(key=lambda x: x[3], reverse=True)
+        hero_winrates_with_percentage.sort(key=lambda x: x[3], reverse=True)
 
-        # Выводим топ-20
-        for rank, (hero_id, total_games, wins, winrate) in enumerate(hero_winrates[:TOP_HEROES_DISPLAY_COUNT], 1):
+        # Выводим топ-N
+        for rank, (hero_id, total_games, wins, winrate) in enumerate(
+                hero_winrates_with_percentage[:TOP_HEROES_DISPLAY_COUNT], 1):
             hero_name = get_hero_name_by_id(hero_id)
 
             rank_color = Colors.BRIGHT_GOLD if rank <= 3 else Colors.BRIGHT_SILVER if rank <= 10 else Colors.BRIGHT_WHITE
@@ -795,7 +993,7 @@ def _analyze_hero_winrates(session):
                   f"{winrate_color}{winrate:.1f}%{Colors.RESET} "
                   f"({Colors.BRIGHT_WHITE}{wins}/{total_games}{Colors.RESET})")
 
-        if not hero_winrates:
+        if not hero_winrates_with_percentage:
             print_status_message(f"Нет героев с минимум {MINIMUM_GAMES_FOR_HERO_WINRATE} играми", "warning")
 
     except Exception as e:
@@ -803,43 +1001,57 @@ def _analyze_hero_winrates(session):
 
 
 def _analyze_hero_variant_winrates(session):
-    """Анализирует винрейт героев с учетом вариантов (топ-20 по винрейту, минимум 50 игр)"""
+    """
+    Анализирует винрейт героев с учетом вариантов.
+
+    Рассчитывает винрейт для каждой комбинации герой+вариант:
+    - Учитывает hero_variant поле для персонализированных версий героев
+    - Применяет отдельный минимальный порог игр для вариантов
+    - Показывает наиболее успешные варианты героев
+
+    Args:
+        session: Сессия SQLAlchemy для работы с БД
+
+    Note:
+        Варианты героев (hero_variant) могут представлять различные стили игры. влияющие на игровую статистику.
+    """
     print_subsection_header(
         f"Топ-{TOP_HEROES_DISPLAY_COUNT} героев по винрейту (с вариантами, мин. {MINIMUM_GAMES_FOR_HERO_VARIANT_WINRATE} игр)",
         "🎨", Colors.BRIGHT_PURPLE)
 
     try:
-        # Получаем всех игроков с их матчами для расчета винрейта по вариантам
-        players_variant_match_results = session.query(
+        # Используем SQL для подсчета винрейта по вариантам
+        hero_variant_winrates = session.query(
             MatchPlayer.hero_id,
             MatchPlayer.hero_variant,
-            MatchPlayer.team_number,
-            Match.radiant_win
-        ).join(Match, MatchPlayer.match_id == Match.match_id).all()
+            func.count(MatchPlayer.id).label('total_games'),
+            func.sum(
+                case(
+                    (
+                        ((MatchPlayer.team_number == 0) & (Match.radiant_win == True)) |
+                        ((MatchPlayer.team_number == 1) & (Match.radiant_win == False)),
+                        1
+                    ),
+                    else_=0
+                )
+            ).label('wins')
+        ).join(Match, MatchPlayer.match_id == Match.match_id) \
+            .group_by(MatchPlayer.hero_id, MatchPlayer.hero_variant) \
+            .having(func.count(MatchPlayer.id) >= MINIMUM_GAMES_FOR_HERO_VARIANT_WINRATE) \
+            .all()
 
-        # Группируем по героям И вариантам и считаем винрейт
-        hero_variant_winrate_stats = defaultdict(lambda: {'total': 0, 'wins': 0})
-
-        for hero_id, hero_variant, team_number, radiant_win in players_variant_match_results:
-            key = (hero_id, hero_variant)
-            hero_variant_winrate_stats[key]['total'] += 1
-            # Игрок выиграл если: он в radiant и radiant_win=True ИЛИ он в dire и radiant_win=False
-            if (team_number == 0 and radiant_win) or (team_number == 1 and not radiant_win):
-                hero_variant_winrate_stats[key]['wins'] += 1
-
-        # Фильтруем комбинации с минимум 50 играми и вычисляем винрейт
-        hero_variant_winrates = []
-        for (hero_id, hero_variant), stats in hero_variant_winrate_stats.items():
-            if stats['total'] >= MINIMUM_GAMES_FOR_HERO_VARIANT_WINRATE:
-                winrate = (stats['wins'] * 100.0) / stats['total']
-                hero_variant_winrates.append((hero_id, hero_variant, stats['total'], stats['wins'], winrate))
+        # Вычисляем винрейт и сортируем
+        hero_variant_winrates_with_percentage = []
+        for hero_id, hero_variant, total_games, wins in hero_variant_winrates:
+            winrate = (wins * 100.0) / total_games if total_games > 0 else 0
+            hero_variant_winrates_with_percentage.append((hero_id, hero_variant, total_games, wins, winrate))
 
         # Сортируем по винрейту
-        hero_variant_winrates.sort(key=lambda x: x[4], reverse=True)
+        hero_variant_winrates_with_percentage.sort(key=lambda x: x[4], reverse=True)
 
-        # Выводим топ-20
+        # Выводим топ-N
         for rank, (hero_id, hero_variant, total_games, wins, winrate) in enumerate(
-                hero_variant_winrates[:TOP_HEROES_DISPLAY_COUNT], 1):
+                hero_variant_winrates_with_percentage[:TOP_HEROES_DISPLAY_COUNT], 1):
             hero_name = get_hero_name_by_id(hero_id)
             variant_text = f" (вариант {hero_variant})" if hero_variant > 0 else ""
 
@@ -851,7 +1063,7 @@ def _analyze_hero_variant_winrates(session):
                 f"{winrate_color}{winrate:.1f}%{Colors.RESET} "
                 f"({Colors.BRIGHT_WHITE}{wins}/{total_games}{Colors.RESET})")
 
-        if not hero_variant_winrates:
+        if not hero_variant_winrates_with_percentage:
             print_status_message(f"Нет героев с вариантами с минимум {MINIMUM_GAMES_FOR_HERO_VARIANT_WINRATE} играми",
                                  "warning")
 
@@ -859,31 +1071,53 @@ def _analyze_hero_variant_winrates(session):
         print_status_message(f"Ошибка при расчете винрейта героев с вариантами: {e}", "error")
 
 
-def _analyze_hero_variants_statistics(session, total_player_records: int):
-    """Анализирует статистику вариантов героев"""
+def _analyze_hero_variants_stats(session, total_player_records: int):
+    """
+    Анализирует статистику вариантов героев.
+
+    Показывает распределение использования различных вариантов:
+    - Общее количество различных вариантов в датасете
+    - Популярность каждого варианта
+    - Процентное распределение
+
+    Args:
+        session: Сессия SQLAlchemy для работы с БД
+        total_player_records (int): Общее количество записей для расчета процентов
+    """
     print_subsection_header("Статистика вариантов героев", "🎨", Colors.BRIGHT_PINK)
 
-    variant_statistics = session.query(
+    variant_stats = session.query(
         MatchPlayer.hero_variant,
         func.count(MatchPlayer.hero_variant).label('count')
     ).group_by(MatchPlayer.hero_variant) \
         .order_by(func.count(MatchPlayer.hero_variant).desc()).all()
 
-    print_info_line("Всего различных вариантов", f"{len(variant_statistics)}", "🎭",
+    print_info_line("Всего различных вариантов", f"{len(variant_stats)}", "🎭",
                     Colors.BRIGHT_WHITE, Colors.BRIGHT_PURPLE)
 
-    for variant, count in variant_statistics[:10]:
+    for variant, count in variant_stats[:DUPLICATE_DISPLAY_LIMIT]:
         percentage = (count / total_player_records) * 100
         variant_text = f"Вариант {variant}" if variant > 0 else "Базовый (0)"
         print_info_line(variant_text, f"{count:,} ({percentage:.1f}%)", "🎨",
                         Colors.BRIGHT_WHITE, Colors.BRIGHT_MINT)
 
 
-def _analyze_economic_statistics(session):
-    """Анализирует экономическую статистику игроков"""
+def _analyze_economic_stats(session):
+    """
+    Анализирует экономическую статистику игроков.
+
+    Рассчитывает диапазоны и средние значения ключевых экономических показателей:
+    - GPM (Gold Per Minute) - скорость накопления золота
+    - XPM (Experience Per Minute) - скорость получения опыта  
+    - Last Hits - добивание крипов для получения золота
+    - Net Worth - общая стоимость всех предметов и золота
+
+    Args:
+        session: Сессия SQLAlchemy для работы с БД
+    """
     print_subsection_header("Экономическая статистика", "💰", Colors.BRIGHT_GOLD)
 
-    economic_statistics = session.query(
+    economic_stats = session.query(
         func.min(MatchPlayer.gold_per_min).label('min_gpm'),
         func.max(MatchPlayer.gold_per_min).label('max_gpm'),
         func.avg(MatchPlayer.gold_per_min).label('avg_gpm'),
@@ -899,51 +1133,92 @@ def _analyze_economic_statistics(session):
     ).first()
 
     print_info_line("GPM",
-                    f"{economic_statistics.min_gpm} - {economic_statistics.max_gpm} (среднее: {economic_statistics.avg_gpm:.0f})",
+                    f"{economic_stats.min_gpm} - {economic_stats.max_gpm} (среднее: {economic_stats.avg_gpm:.0f})",
                     "💰", Colors.BRIGHT_WHITE, Colors.BRIGHT_GOLD)
     print_info_line("XPM",
-                    f"{economic_statistics.min_xpm} - {economic_statistics.max_xpm} (среднее: {economic_statistics.avg_xpm:.0f})",
+                    f"{economic_stats.min_xpm} - {economic_stats.max_xpm} (среднее: {economic_stats.avg_xpm:.0f})",
                     "⭐", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
     print_info_line("Last Hits",
-                    f"{economic_statistics.min_lh} - {economic_statistics.max_lh} (среднее: {economic_statistics.avg_lh:.0f})",
-                    "🏹", Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN)
+                    f"{economic_stats.min_lh} - {economic_stats.max_lh} (среднее: {economic_stats.avg_lh:.0f})",
+                    "🹹", Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN)
     print_info_line("Net Worth",
-                    f"{economic_statistics.min_nw:,} - {economic_statistics.max_nw:,} (среднее: {economic_statistics.avg_nw:,.0f})",
+                    f"{economic_stats.min_nw:,} - {economic_stats.max_nw:,} (среднее: {economic_stats.avg_nw:,.0f})",
                     "💎", Colors.BRIGHT_WHITE, Colors.BRIGHT_CYAN)
 
 
-def _analyze_level_statistics(session, total_player_records: int):
-    """Анализирует статистику уровней игроков"""
+def _analyze_level_stats(session, total_player_records: int):
+    """
+    Анализирует статистику уровней с выводом всех уровней по порядку.
+
+    Предоставляет подробную картину распределения игроков по уровням:
+    - Полное распределение от минимального до максимального уровня
+    - Процентное соотношение для каждого уровня
+    - Цветовое кодирование по популярности уровня
+    - Сравнение средних уровней по ролям
+    - Общую статистику уровней
+
+    Args:
+        session: Сессия SQLAlchemy для работы с БД
+        total_player_records (int): Общее количество записей для расчета процентов
+    """
     print_subsection_header("Статистика уровней", "📊", Colors.BRIGHT_BLUE)
 
     try:
-        # Детальная статистика по всем уровням
+        # Получаем распределение по всем уровням
         level_distribution = session.query(
             MatchPlayer.level,
             func.count(MatchPlayer.level).label('count')
         ).group_by(MatchPlayer.level) \
-            .order_by(MatchPlayer.level).all()
+            .order_by(MatchPlayer.level).all()  # Сортируем по уровню, а не по количеству
 
-        print_info_line("Распределение по уровням", f"{len(level_distribution)} уникальных уровней", "📈",
-                        Colors.BRIGHT_WHITE, Colors.BRIGHT_BLUE)
+        if not level_distribution:
+            print_status_message("Нет данных об уровнях игроков", "warning")
+            return
 
-        # Показываем топ-10 самых частых уровней
-        level_distribution_sorted = sorted(level_distribution, key=lambda x: x[1], reverse=True)
-        for level, count in level_distribution_sorted[:10]:
-            percentage = (count / total_player_records) * 100
-            print_info_line(f"Уровень {level}", f"{count:,} ({percentage:.1f}%)", "🎯",
-                            Colors.BRIGHT_WHITE, Colors.BRIGHT_ORANGE)
+        # Создаем словарь для быстрого доступа
+        level_dict = {level: count for level, count in level_distribution}
+
+        # Определяем диапазон уровней
+        min_level = min(level_dict.keys())
+        max_level = max(level_dict.keys())
+
+        print()
+        print(f"{Colors.BRIGHT_WHITE}🎯 Распределение игроков по уровням ({min_level}-{max_level}):{Colors.RESET}")
+
+        # Выводим все уровни по порядку
+        for level in range(min_level, max_level + 1):
+            count = level_dict.get(level, 0)
+            if count > 0:
+                percentage = (count / total_player_records) * 100
+
+                # Цветовая кодировка в зависимости от популярности уровня
+                if percentage >= 8.0:
+                    color = Colors.BRIGHT_GREEN
+                elif percentage >= 5.0:
+                    color = Colors.BRIGHT_YELLOW
+                elif percentage >= 2.0:
+                    color = Colors.BRIGHT_ORANGE
+                else:
+                    color = Colors.BRIGHT_WHITE
+
+                print(
+                    f"    {Colors.BRIGHT_BLUE}Уровень {level:2d}:{Colors.RESET} {color}{count:>8,}{Colors.RESET} игроков ({color}{percentage:4.1f}%{Colors.RESET})")
+            else:
+                # Если уровень не найден в данных
+                print(
+                    f"    {Colors.BRIGHT_BLUE}Уровень {level:2d}:{Colors.RESET} {Colors.BRIGHT_BLACK}       0{Colors.RESET} игроков ({Colors.BRIGHT_BLACK} 0.0%{Colors.RESET})")
 
         # Средний уровень по ролям
-        role_level_statistics = session.query(
+        role_level_stats = session.query(
             MatchPlayer.role,
             func.avg(MatchPlayer.level).label('avg_level'),
             func.min(MatchPlayer.level).label('min_level'),
             func.max(MatchPlayer.level).label('max_level')
         ).group_by(MatchPlayer.role).all()
 
-        print_subsection_header("Статистика уровней по ролям", "🎭", Colors.BRIGHT_PURPLE)
-        for role_data in role_level_statistics:
+        print()
+        print(f"{Colors.BRIGHT_WHITE}🎭 Статистика по ролям:{Colors.RESET}")
+        for role_data in role_level_stats:
             role = role_data.role
             avg_level = role_data.avg_level
             min_level = role_data.min_level
@@ -952,36 +1227,43 @@ def _analyze_level_statistics(session, total_player_records: int):
             role_emoji = "⚔️" if role == "core" else "🛡️"
             role_color = Colors.BRIGHT_RED if role == "core" else Colors.BRIGHT_CYAN
 
-            print_info_line(f"{role_emoji} {role.upper()}",
-                            f"среднее {avg_level:.1f}, диапазон {min_level}-{max_level}",
-                            "📊", Colors.BRIGHT_WHITE, role_color)
+            print(
+                f"    {role_emoji} {role_color}{role.upper():<8}{Colors.RESET} среднее {Colors.BRIGHT_YELLOW}{avg_level:5.1f}{Colors.RESET}, диапазон {min_level}-{max_level}")
 
         # Общая статистика уровней
-        overall_level_statistics = session.query(
+        overall_level_stats = session.query(
             func.min(MatchPlayer.level).label('min_level'),
             func.max(MatchPlayer.level).label('max_level'),
             func.avg(MatchPlayer.level).label('avg_level')
         ).first()
 
-        print_info_line("Общая статистика",
-                        f"среднее {overall_level_statistics.avg_level:.1f}, диапазон {overall_level_statistics.min_level}-{overall_level_statistics.max_level}",
-                        "🎯", Colors.BRIGHT_WHITE, Colors.BRIGHT_MINT)
+        print()
+        print(f"{Colors.BRIGHT_WHITE}📈 Общая статистика:{Colors.RESET}")
+        print(f"    Средний уровень: {Colors.BRIGHT_YELLOW}{overall_level_stats.avg_level:.2f}{Colors.RESET}")
+        print(
+            f"    Диапазон:        {Colors.BRIGHT_CYAN}{overall_level_stats.min_level} - {overall_level_stats.max_level}{Colors.RESET}")
+        print(f"    Всего уровней:   {Colors.BRIGHT_GREEN}{len(level_distribution)}{Colors.RESET}")
 
     except Exception as e:
         print_status_message(f"Ошибка при анализе уровней: {e}", "error")
-        # Fallback к простой статистике
-        level_statistics = session.query(
-            func.min(MatchPlayer.level).label('min_level'),
-            func.max(MatchPlayer.level).label('max_level'),
-            func.avg(MatchPlayer.level).label('avg_level')
-        ).first()
-        print_info_line("Уровень",
-                        f"{level_statistics.min_level} - {level_statistics.max_level} (среднее: {level_statistics.avg_level:.1f})",
-                        "📈", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
 
 
-def _analyze_special_items_statistics(session, total_player_records: int):
-    """Анализирует статистику специальных предметов (Aghanim's)"""
+def _analyze_special_items_stats(session, total_player_records: int):
+    """
+    Анализирует статистику специальных предметов (Aghanim's).
+
+    Подсчитывает использование ключевых эндгейм предметов:
+    - Aghanim's Scepter - усиливает ультимативную способность героя
+    - Aghanim's Shard - дает дополнительную способность или усиливает существующую  
+    - Moon Shard - увеличивает скорость атаки, может быть съеден
+
+    Args:
+        session: Сессия SQLAlchemy для работы с БД
+        total_player_records (int): Общее количество записей для расчета процентов
+
+    Note:
+        Предметы считаются использованными если соответствующее поле > 0
+    """
     print_subsection_header("Статистика Aghanim's предметов", "🔮", Colors.BRIGHT_MAGENTA)
 
     try:
@@ -1005,34 +1287,154 @@ def _analyze_special_items_statistics(session, total_player_records: int):
         print_status_message(f"Ошибка при анализе Aghanim's предметов: {e}", "error")
 
 
-def main(database_url: str = None):
+def generate_final_report(program_start_time: float, matches_count: int,
+                          players_count: int, integrity_issues: list, session):
     """
-    Главная функция для комплексной проверки и анализа датасета Dota 2
+    Генерирует итоговый отчет с наиболее важной аналитической информацией.
 
-    Выполняет полный цикл проверки и анализа:
-    1. Подключение к базе данных
-    2. Загрузка данных о героях из БД
-    3. Проверка целостности данных
-    4. Анализ статистики матчей
-    5. Анализ статистики игроков
-    6. Вывод итогового отчета
+    Создает комплексный отчет о качестве и состоянии датасета:
+    - Объем проанализированных данных
+    - Баланс и качество данных (винрейт команд, средняя длительность)
+    - Временной охват данных
+    - Производительность анализа
+    - Статус целостности данных
+    - Рекомендации по использованию
 
     Args:
-        database_url: URL базы данных. Если None, использует DATABASE_URL из config
+        program_start_time (float): Время начала выполнения программы
+        matches_count (int): Количество матчей в датасете
+        players_count (int): Количество записей игроков
+        integrity_issues (list): Список найденных проблем целостности
+        session: Сессия SQLAlchemy для дополнительных запросов
+    """
+    end_time = time.time()
+    execution_time = end_time - program_start_time
+
+    # Получаем ключевые статистические данные для отчета
+    try:
+        # Статистика матчей
+        radiant_wins = session.query(func.count(Match.match_id)).filter(Match.radiant_win == True).scalar()
+        dire_wins = session.query(func.count(Match.match_id)).filter(Match.radiant_win == False).scalar()
+        radiant_winrate = (radiant_wins / matches_count * 100) if matches_count > 0 else 0
+        dire_winrate = (dire_wins / matches_count * 100) if matches_count > 0 else 0
+
+        # Временной диапазон
+        time_range = session.query(
+            func.min(Match.start_time).label('min_time'),
+            func.max(Match.start_time).label('max_time')
+        ).first()
+
+        days_covered = 0
+        if time_range and time_range.min_time and time_range.max_time:
+            days_covered = (time_range.max_time - time_range.min_time) / (24 * 3600)
+
+        # Статистика игроков
+        unique_players = session.query(func.count(distinct(MatchPlayer.account_id))).filter(
+            MatchPlayer.account_id != PRIVATE_ACCOUNT_ID).scalar()
+
+        # Средняя длительность матча
+        avg_duration = session.query(func.avg(Match.duration)).scalar()
+        avg_duration_str = f"{int(avg_duration) // 60}:{int(avg_duration) % 60:02d}" if avg_duration else "N/A"
+
+    except Exception as e:
+        print_status_message(f"Ошибка получения статистики для отчета: {e}", "warning")
+        radiant_winrate = 0
+        dire_winrate = 0
+        days_covered = 0
+        unique_players = 0
+        avg_duration_str = "N/A"
+
+    print_section_header("ИТОГОВЫЙ ОТЧЕТ", "📋", 80, Colors.BRIGHT_GOLD)
+
+    print(f"{Colors.BRIGHT_WHITE}📊 Объем проанализированных данных:{Colors.RESET}")
+    print(f"    ├─ Матчей обработано:     {Colors.BRIGHT_GREEN}{matches_count:>10,}{Colors.RESET}")
+    print(f"    ├─ Записей игроков:       {Colors.BRIGHT_CYAN}{players_count:>10,}{Colors.RESET}")
+    print(f"    ├─ Уникальных игроков:    {Colors.BRIGHT_BLUE}{unique_players:>10,}{Colors.RESET}")
+    print(f"    └─ Героев в базе:         {Colors.BRIGHT_PURPLE}{len(HEROES_CACHE):>10,}{Colors.RESET}")
+
+    print()
+    print(f"{Colors.BRIGHT_WHITE}⚖️ Баланс и качество данных:{Colors.RESET}")
+    print(f"    ├─ Radiant винрейт:       {Colors.BRIGHT_GREEN}{radiant_winrate:>9.1f}%{Colors.RESET}")
+    print(f"    ├─ Dire винрейт:          {Colors.BRIGHT_RED}{dire_winrate:>9.1f}%{Colors.RESET}")
+    print(f"    ├─ Средняя длительность:  {Colors.BRIGHT_ORANGE}{avg_duration_str:>10}{Colors.RESET}")
+    print(f"    └─ Временной охват:       {Colors.BRIGHT_MAGENTA}{days_covered:>9.1f} дней{Colors.RESET}")
+
+    print()
+    print(f"{Colors.BRIGHT_WHITE}⏱️ Производительность анализа:{Colors.RESET}")
+    print(f"    └─ Время выполнения:      {Colors.BRIGHT_YELLOW}{execution_time:>9.2f} сек{Colors.RESET}")
+
+    # Статус целостности данных
+    if integrity_issues:
+        print()
+        print(f"{Colors.BRIGHT_WHITE}⚠️ Проблемы целостности данных:{Colors.RESET}")
+        print(f"    Обнаружено проблем: {Colors.BRIGHT_RED}{len(integrity_issues)}{Colors.RESET}")
+        for i, issue in enumerate(integrity_issues, 1):
+            print(f"    {i}. {Colors.BRIGHT_RED}{issue}{Colors.RESET}")
+
+    print_section_header("АНАЛИЗ ЗАВЕРШЕН", "🎉", 80, Colors.BRIGHT_GREEN)
+
+    # Информация о готовности данных
+    if not integrity_issues:
+        print(f"✅ {Colors.BRIGHT_GREEN}Все проверки целостности пройдены успешно!{Colors.RESET}")
+        print(f"✅ {Colors.BRIGHT_GREEN}Данные готовы для использования в анализе и машинном обучении{Colors.RESET}")
+    else:
+        print(f"⚠️ {Colors.BRIGHT_YELLOW}Обнаружены проблемы целостности данных{Colors.RESET}")
+        print(f"🔍 {Colors.BRIGHT_YELLOW}Рекомендуется исправить проблемы перед использованием данных{Colors.RESET}")
+
+
+def main():
+    """
+    Главная функция для комплексной проверки и анализа датасета Dota 2.
+    Выполняет полный цикл валидации и анализа датасета:
+
+    1. Инициализация:
+       - Подключение к базе данных
+       - Загрузка кэша героев
+       - Проверка существования таблиц
+
+    2. Информационный анализ:
+       - Получение размера и веса датасета
+       - Отображение основной статистики
+
+    3. Проверки целостности:
+       - Валидация уникальности ключевых полей
+       - Контроль NULL значений
+       - Проверка связности данных между таблицами
+
+    4. Аналитические исследования:
+       - Статистика матчей (длительность, режимы, структуры)
+       - Статистика игроков (KDA, роли, экономика, уровни)
+       - Анализ героев (популярность, винрейт, варианты)
+
+    5. Итоговый отчет:
+       - Суммарная статистика качества данных
+       - Рекомендации по использованию
+       - Производительность анализа
+
+    Optimizations applied:
+    - Использование SQL агрегатных функций вместо загрузки данных в память
+    - Оптимизированные запросы для проверки связности данных  
+    - Эффективная работа с битовыми масками для структур
+    - Минимизация количества обращений к БД
+
+    Raises:
+        SQLAlchemyError: При ошибках работы с базой данных
+        DatabaseConnectionError: При проблемах с подключением к БД
+        DataValidationError: При критических ошибках валидации данных
     """
     program_start_time = time.time()
+    session = None  # Инициализируем переменную для корректной работы в finally
 
     # === ЗАГОЛОВОК ПРОГРАММЫ ===
     print_section_header("КОМПЛЕКСНАЯ ПРОВЕРКА И АНАЛИЗ ДАТАСЕТА DOTA 2", "🔍", 100, Colors.BRIGHT_CYAN)
 
     # === ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ ===
     try:
-        database_connection_url = database_url or DATASET_DATABASE_URL
-        engine = create_engine(database_connection_url)
-        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-        session = SessionLocal()
+        engine = create_engine(DATASET_DATABASE_URL)
+        session_local = sessionmaker(autocommit=False, autoflush=False, bind=engine)  # lowercase
+        session = session_local()
 
-        print_status_message("Подключение к базе данных установлено", "success")
+        print_status_message("Подключение к базе данных установлено", "success", "✅")
 
         # === ЗАГРУЗКА ДАННЫХ О ГЕРОЯХ ===
         if not initialize_heroes_cache():
@@ -1041,80 +1443,57 @@ def main(database_url: str = None):
             return
 
         # === ПРОВЕРКА СУЩЕСТВОВАНИЯ ТАБЛИЦ ===
+        db_info = get_database_info(session)
         try:
-            matches_count = session.query(func.count(Match.match_id)).scalar()
-            players_count = session.query(func.count(MatchPlayer.id)).scalar()
-            print_status_message(f"Найдено {matches_count:,} матчей и {players_count:,} записей игроков", "success")
-        except Exception as e:
-            print_status_message(f"Ошибка при проверке таблиц: {e}", "error")
+            matches_count = db_info['matches_count']
+            players_count = db_info['players_count']
+        except KeyError as e:
+            print_status_message(f"Ошибка при получении информации о таблицах: отсутствует ключ {e}", "error")
+            return
+        except (TypeError, ValueError) as e:
+            print_status_message(f"Ошибка при обработке данных таблиц: {e}", "error")
             return
 
         if matches_count == 0 and players_count == 0:
             print_status_message("База данных пуста, нет данных для анализа", "error")
             return
 
-        # === ВЫПОЛНЕНИЕ АНАЛИЗА ===
-        print_status_message("Начинаем комплексный анализ...", "info")
+        # === ПОЛУЧЕНИЕ И ОТОБРАЖЕНИЕ ИНФОРМАЦИИ О ВЕСЕ ДАТАСЕТА ===
+        display_database_info(db_info)
 
+        # === ВЫПОЛНЕНИЕ АНАЛИЗА ===
         # 1. Проверка целостности данных
-        integrity_issues = validate_database_integrity(session)
+        integrity_issues = validate_data(session)
 
         # 2. Анализ статистики матчей
-        analyze_match_statistics(session)
+        analyze_match_data(session)
 
         # 3. Анализ статистики игроков
-        analyze_player_statistics(session)
+        analyze_player_data(session)
 
         # === ИТОГОВЫЙ ОТЧЕТ ===
-        _generate_final_report(program_start_time, matches_count, players_count, integrity_issues)
+        generate_final_report(program_start_time, matches_count, players_count, integrity_issues, session)
 
     except SQLAlchemyError as e:
         print_status_message(f"Ошибка базы данных: {e}", "error")
-    except Exception as e:
-        print_status_message(f"Неожиданная ошибка: {e}", "error")
+    except ConnectionError as e:
+        print_status_message(f"Ошибка подключения к базе данных: {e}", "error")
+    except FileNotFoundError as e:
+        print_status_message(f"Файл базы данных не найден: {e}", "error")
+    except PermissionError as e:
+        print_status_message(f"Нет прав доступа к базе данных: {e}", "error")
+    except (RuntimeError, ValueError) as e:
+        print_status_message(f"Ошибка выполнения: {e}", "error")
     finally:
-        try:
-            session.close()
-            print_status_message("Соединение с базой данных закрыто", "success")
-        except:
-            pass
-
-
-def _generate_final_report(program_start_time: float, matches_count: int,
-                           players_count: int, integrity_issues: list):
-    """
-    Генерирует итоговый отчет о выполненном анализе
-
-    Args:
-        program_start_time: Время начала выполнения программы
-        matches_count: Количество проанализированных матчей
-        players_count: Количество проанализированных записей игроков
-        integrity_issues: Список проблем целостности данных
-    """
-    end_time = time.time()
-    execution_time = end_time - program_start_time
-
-    print_section_header("ИТОГОВЫЙ ОТЧЕТ", "📋", 80, Colors.BRIGHT_GOLD)
-
-    print_info_line("Время выполнения анализа", f"{execution_time:.2f} секунд", "⏱️",
-                    Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
-    print_info_line("Проанализировано матчей", f"{matches_count:,}", "📊",
-                    Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN)
-    print_info_line("Проанализировано записей игроков", f"{players_count:,}", "👥",
-                    Colors.BRIGHT_WHITE, Colors.BRIGHT_CYAN)
-    print_info_line("Загружено героев в кэш", f"{len(HEROES_CACHE):,}", "🦸",
-                    Colors.BRIGHT_WHITE, Colors.BRIGHT_BLUE)
-
-    if integrity_issues:
-        print_status_message(f"ВНИМАНИЕ! Обнаружены проблемы целостности данных: {len(integrity_issues)}", "warning")
-        for issue in integrity_issues:
-            print_info_line("Проблема", issue, "•", Colors.BRIGHT_WHITE, Colors.BRIGHT_RED)
-        print_status_message("Рекомендуется исправить эти проблемы перед использованием данных для анализа", "warning")
-    else:
-        print_status_message("Все проверки целостности пройдены успешно!", "success")
-        print_status_message("Данные готовы для использования в анализе и машинном обучении", "success")
-
-    print_section_header("АНАЛИЗ ЗАВЕРШЕН", "🎉", 80, Colors.BRIGHT_GREEN)
+        # Проверяем, что session был создан перед попыткой закрытия
+        if session is not None:
+            try:
+                session.close()
+                print_status_message("Соединение с базой данных закрыто", "success")
+            except SQLAlchemyError as e:
+                print_status_message(f"Ошибка при закрытии соединения: {e}", "warning")
+            except Exception as e:
+                print_status_message(f"Неожиданная ошибка при закрытии соединения: {e}", "warning")
 
 
 if __name__ == "__main__":
