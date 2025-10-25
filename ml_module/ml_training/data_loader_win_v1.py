@@ -122,9 +122,11 @@ class DataLoaderWinV1:
             OSError: Если не удается получить доступ к файлу
             ValueError: Если HDF5 файл не содержит данных для обучения
         """
-        print_subsection_header("Загрузка данных из HDF5", "📂", Colors.BRIGHT_CYAN)
-        print_info_line("Полный путь", hdf5_path, "📂", value_color=Colors.BRIGHT_BLUE)
-        print_info_line("Название файла", Path(hdf5_path).name, "🗃️", value_color=Colors.BRIGHT_CYAN)
+        print_subsection_header("Загрузка данных из HDF5", "📂", Colors.BLUE_2)
+        print_info_line("Полный путь", hdf5_path, "📂",
+                        Colors.BLUE_3, Colors.AMBER_4)
+        print_info_line("Название файла", Path(hdf5_path).name, "🗃️",
+                        Colors.BLUE_3, Colors.BRIGHT_GREEN)
 
         try:
             with h5py.File(hdf5_path, 'r') as h5_file:
@@ -152,13 +154,16 @@ class DataLoaderWinV1:
         dire_wins = total_matches - radiant_wins
         radiant_win_rate = (radiant_wins / total_matches) * 100
 
-        print_info_line("Всего матчей", f"{total_matches:,}", "🎮", value_color=Colors.BRIGHT_GOLD)
+        print_info_line("Всего матчей", f"{total_matches:,}", "🎮",
+                        Colors.BLUE_3, Colors.BRIGHT_WHITE)
         print_info_line("Побед Radiant", f"{int(radiant_wins):,} ({radiant_win_rate:.1f}%)", "🌞",
-                        value_color=Colors.BRIGHT_YELLOW)
+                        Colors.BLUE_3, Colors.GOLD_3)
         print_info_line("Побед Dire", f"{int(dire_wins):,} ({100 - radiant_win_rate:.1f}%)", "🌑",
-                        value_color=Colors.BRIGHT_PURPLE)
-        print_info_line("Форма Radiant", f"{radiant_all.shape}", "📐", value_color=Colors.BRIGHT_BLUE)
-        print_info_line("Форма Dire", f"{dire_all.shape}", "📐", value_color=Colors.BRIGHT_BLUE)
+                        Colors.BLUE_3, Colors.BRIGHT_PURPLE)
+        print_info_line("Форма Radiant", f"{radiant_all.shape}", "📐",
+                        Colors.BLUE_3, Colors.BLUE_4)
+        print_info_line("Форма Dire", f"{dire_all.shape}", "📐",
+                        Colors.BLUE_3, Colors.BLUE_4)
 
         # Формирование Dict формата
         features = {
@@ -203,7 +208,8 @@ class DataLoaderWinV1:
             dire_features.append(dire_indices)
             labels.append(float(match['radiant_win']))
 
-        print_info_line("Подготовлено матчей", f"{len(labels)}", "🎮", value_color=Colors.BRIGHT_CYAN)
+        print_info_line("Подготовлено матчей", f"{len(labels)}", "🎮",
+                        Colors.BLUE_3, Colors.BRIGHT_GREEN)
 
         features = {
             'radiant_heroes': np.array(radiant_features, dtype=np.int32),

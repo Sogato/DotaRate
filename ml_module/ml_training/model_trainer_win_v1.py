@@ -39,33 +39,33 @@ from utils.console import (
 )
 
 # === КОНСТАНТЫ ФАЙЛОВ ===
-HDF5_FILENAME = "HDF5_dataset_{version}_main.h5"  # Имя HDF5 файла с данными
-MODEL_FILENAME = "model_win_v1_{version}.keras"  # Имя сохраняемой модели
+HDF5_FILENAME = "HDF5_dataset_{version}_main.h5"    # Имя HDF5 файла с данными
+MODEL_FILENAME = "model_win_v1_{version}.keras"     # Имя сохраняемой модели
 
 # === КОНСТАНТЫ АРХИТЕКТУРЫ ===
-DEFAULT_HIDDEN_UNITS = [512, 256]  # Размеры скрытых Dense слоев
-DEFAULT_EMBEDDING_DIM = 128  # Размерность embedding векторов героев
-DEFAULT_DROPOUT_RATE = 0.15  # Коэффициент dropout для регуляризации
-DEFAULT_L2_REG = 0.00015  # Коэффициент L2 регуляризации весов
+DEFAULT_HIDDEN_UNITS = [512, 256]   # Размеры скрытых Dense слоев
+DEFAULT_EMBEDDING_DIM = 128         # Размерность embedding векторов героев
+DEFAULT_DROPOUT_RATE = 0.15         # Коэффициент dropout для регуляризации
+DEFAULT_L2_REG = 0.00015            # Коэффициент L2 регуляризации весов
 
 # === КОНСТАНТЫ ОБУЧЕНИЯ ===
-DEFAULT_EPOCHS = 2  # Максимальное количество эпох обучения
-DEFAULT_BATCH_SIZE = 512  # Размер батча при обучении
-DEFAULT_LEARNING_RATE = 0.0005  # Начальная скорость обучения оптимизатора
-N_FOLDS = 5  # Количество фолдов для кросс-валидации
+DEFAULT_EPOCHS = 1000               # Максимальное количество эпох обучения
+DEFAULT_BATCH_SIZE = 512            # Размер батча при обучении
+DEFAULT_LEARNING_RATE = 0.0005      # Начальная скорость обучения оптимизатора
+N_FOLDS = 5                         # Количество фолдов для кросс-валидации
 
 # === КОНСТАНТЫ CALLBACKS ===
 # EarlyStopping - остановка обучения при отсутствии улучшений
-EARLY_STOPPING_PATIENCE = 25  # Количество эпох без улучшения до остановки
-EARLY_STOPPING_MIN_DELTA = 0.0001  # Минимальное изменение для учета как улучшение
+EARLY_STOPPING_PATIENCE = 25        # Количество эпох без улучшения до остановки
+EARLY_STOPPING_MIN_DELTA = 0.0001   # Минимальное изменение для учета как улучшение
 EARLY_STOPPING_MONITOR = 'val_auc'  # Метрика для отслеживания
-EARLY_STOPPING_MODE = 'max'  # Режим отслеживания
+EARLY_STOPPING_MODE = 'max'         # Режим отслеживания
 
 # ReduceLROnPlateau - снижение learning rate при плато
-REDUCE_LR_PATIENCE = 5  # Количество эпох без улучшения до снижения LR
-REDUCE_LR_FACTOR = 0.5  # Коэффициент снижения LR (новый LR = старый × factor)
-REDUCE_LR_COOLDOWN = 1  # Количество эпох ожидания после снижения LR
-REDUCE_LR_MIN_LR = 0.000001  # Минимальное значение LR
+REDUCE_LR_PATIENCE = 5          # Количество эпох без улучшения до снижения LR
+REDUCE_LR_FACTOR = 0.5          # Коэффициент снижения LR (новый LR = старый × factor)
+REDUCE_LR_COOLDOWN = 1          # Количество эпох ожидания после снижения LR
+REDUCE_LR_MIN_LR = 0.000001     # Минимальное значение LR
 REDUCE_LR_MONITOR = 'val_loss'  # Метрика для отслеживания плато
 
 
@@ -142,7 +142,7 @@ class ModelTrainerWinV1:
             OSError: Если не удается получить доступ к файлу
             ValueError: Если данные некорректны (пустой датасет и т.д.)
         """
-        print_section_header("ПОДГОТОВКА ДАННЫХ К ОБУЧЕНИЮ", "📦", color=Colors.BRIGHT_BLUE)
+        print_section_header("ПОДГОТОВКА ДАННЫХ К ОБУЧЕНИЮ", "📦", color=Colors.BLUE_2)
 
         try:
             # Вывод конфигурации
@@ -157,7 +157,7 @@ class ModelTrainerWinV1:
 
             fold_results = []
 
-            print_section_header(f"ОБУЧЕНИЕ {N_FOLDS} МОДЕЛЕЙ (K-FOLD CV)", "🧠", color=Colors.BRIGHT_GREEN)
+            print_section_header(f"ОБУЧЕНИЕ {N_FOLDS} МОДЕЛЕЙ (K-FOLD CV)", "🧠", color=Colors.GREEN_1)
 
             # Обучение отдельных фолдов
             for fold_num, (train_idx, val_idx) in enumerate(skf.split(np.zeros(total_samples), labels_all), 1):
@@ -199,33 +199,33 @@ class ModelTrainerWinV1:
         """
         Выводит конфигурацию модели: архитектуру, регуляризацию, параметры обучения.
         """
-        print_subsection_header("Конфигурация модели", "🔧", Colors.BRIGHT_BLUE)
+        print_subsection_header("Конфигурация модели", "🔧", Colors.TEAL_2)
 
         # Архитектура
         print_info_line("Количество героев", f"{self.loader.hero_mapper.total_heroes:,}", "🧙‍♂️",
-                        Colors.BRIGHT_WHITE, Colors.BRIGHT_CYAN)
+                        Colors.BLUE_3, Colors.BRIGHT_CYAN)
         print_info_line("Размер команды", f"{TEAM_SIZE}", "👥",
-                        Colors.BRIGHT_WHITE, Colors.BRIGHT_ORANGE)
+                        Colors.BLUE_3, Colors.BRIGHT_WHITE)
         print_info_line("Размерность embedding", f"{self.embedding_dim}", "📐",
-                        Colors.BRIGHT_WHITE, Colors.BRIGHT_PURPLE)
+                        Colors.BLUE_3, Colors.LAVENDER)
         print_info_line("Скрытые слои", f"{self.hidden_units}", "🧠",
-                        Colors.BRIGHT_WHITE, Colors.BRIGHT_BLUE)
+                        Colors.BLUE_3, Colors.BRIGHT_PURPLE)
 
         # Регуляризация
         print_info_line("Dropout rate", f"{self.dropout_rate}", "🔢",
-                        Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
+                        Colors.BLUE_3, Colors.ORANGE)
         print_info_line("L2 регуляризация", f"{self.l2_reg}", "⚙️",
-                        Colors.BRIGHT_WHITE, Colors.BRIGHT_MAGENTA)
+                        Colors.BLUE_3, Colors.CORAL)
 
         # Параметры обучения
         print_info_line("Количество фолдов", f"{N_FOLDS}", "🎯",
-                        Colors.BRIGHT_WHITE, Colors.BRIGHT_TEAL)
+                        Colors.BLUE_3, Colors.BRIGHT_WHITE)
         print_info_line("Количество эпох", f"{self.epochs}", "🔁",
-                        Colors.BRIGHT_WHITE, Colors.BRIGHT_LIME)
+                        Colors.BLUE_3, Colors.MINT)
         print_info_line("Размер батча", f"{self.batch_size:,}", "📦",
-                        Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN)
+                        Colors.BLUE_3, Colors.BRIGHT_GREEN)
         print_info_line("Скорость обучения", f"{self.learning_rate}", "🚀",
-                        Colors.BRIGHT_WHITE, Colors.BRIGHT_GOLD)
+                        Colors.BLUE_3, Colors.GOLD_3)
 
     def _build_and_compile_model(self) -> Model:
         """
@@ -339,7 +339,7 @@ class ModelTrainerWinV1:
         Returns:
             Dict[str, Any]: Результаты фолда с метриками и путем к модели
         """
-        print_subsection_header(f"Обучение фолда {fold_num}/{N_FOLDS}", "🎯", Colors.BRIGHT_BLUE)
+        print_subsection_header(f"Обучение фолда {fold_num}/{N_FOLDS}", "🎯", Colors.BRIGHT_GREEN)
 
         fold_start_time = time.time()
 
@@ -360,9 +360,9 @@ class ModelTrainerWinV1:
         val_size = len(val_idx)
 
         print_info_line("Train примеров", f"{train_size:,}", "🏋",
-                        Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN)
+                        Colors.BLUE_3, Colors.BRIGHT_PURPLE)
         print_info_line("Val примеров", f"{val_size:,}", "🔬",
-                        Colors.BRIGHT_WHITE, Colors.BRIGHT_PURPLE)
+                        Colors.BLUE_3, Colors.BRIGHT_CYAN)
         print()
 
         # Создание модели
@@ -463,15 +463,15 @@ class ModelTrainerWinV1:
         print_subsection_header(f"Результаты фолда {fold_num}", "📈", Colors.BRIGHT_GREEN)
 
         print_info_line("Эпох обучено", f"{epochs_trained}", "🔁",
-                        Colors.BRIGHT_WHITE, Colors.BRIGHT_ORANGE)
+                        Colors.BLUE_3, Colors.MINT)
         print_info_line("Лучший val AUC", f"{best_val_auc:.4f}", "⭐",
-                        Colors.BRIGHT_WHITE, Colors.BRIGHT_GOLD)
+                        Colors.BLUE_3, Colors.GOLD_1)
         print_info_line("Лучшая val accuracy", f"{best_val_acc:.4f}", "🌟",
-                        Colors.BRIGHT_WHITE, Colors.BRIGHT_CYAN)
+                        Colors.BLUE_3, Colors.GOLD_3)
         print_info_line("Параметров модели", f"{model_params:,}", "🧩",
-                        Colors.BRIGHT_WHITE, Colors.BRIGHT_BLUE)
+                        Colors.BLUE_3, Colors.BRIGHT_CYAN)
         print_info_line("Время обучения", f"{training_time / 60:.1f} мин.", "⏱️",
-                        Colors.BRIGHT_WHITE, Colors.BRIGHT_MAGENTA)
+                        Colors.BLUE_3, Colors.LAVENDER)
 
     @staticmethod
     def _print_ensemble_summary(fold_results: List[Dict[str, Any]]) -> None:
@@ -481,7 +481,7 @@ class ModelTrainerWinV1:
         Args:
             fold_results (List[Dict[str, Any]]): Результаты всех фолдов
         """
-        print_section_header("ФИНАЛЬНЫЕ РЕЗУЛЬТАТЫ АНСАМБЛЯ", "🏆", color=Colors.BRIGHT_YELLOW)
+        print_section_header("ФИНАЛЬНЫЕ РЕЗУЛЬТАТЫ АНСАМБЛЯ", "🏆", color=Colors.GOLD_1)
 
         # Расчет средних метрик
         avg_val_auc = np.mean([fold_data['best_val_auc'] for fold_data in fold_results])
@@ -490,22 +490,26 @@ class ModelTrainerWinV1:
         std_val_acc = np.std([fold_data['best_val_accuracy'] for fold_data in fold_results])
         avg_training_time = np.mean([fold_data['training_time'] for fold_data in fold_results])
 
-        print_subsection_header("Средние метрики по фолдам", "🧪", Colors.BRIGHT_TEAL)
+        print_subsection_header("Средние метрики по фолдам", "🧪", Colors.GOLD_2)
         print_info_line("Средний val AUC", f"{avg_val_auc:.4f} ± {std_val_auc:.4f}", "📏",
-                        Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN)
+                        Colors.BLUE_3, Colors.GOLD_1)
         print_info_line("Средняя val accuracy", f"{avg_val_acc:.4f} ± {std_val_acc:.4f}", "⚖️",
-                        Colors.BRIGHT_WHITE, Colors.BRIGHT_BLUE)
-        print_info_line("Среднее время обучения фолда", f"{avg_training_time / 60:.1f} мин.",
-                        "⏰", Colors.BRIGHT_WHITE, Colors.BRIGHT_MAGENTA)
+                        Colors.BLUE_3, Colors.GOLD_3)
+        print_info_line("Среднее время обучения фолда", f"{avg_training_time / 60:.1f} мин.", "⏰",
+                        Colors.BLUE_3, Colors.LAVENDER)
 
         # Детальная статистика
-        print_subsection_header("Детальная статистика фолдов", "📋", Colors.BRIGHT_ORANGE)
+        print_subsection_header("Детальная статистика фолдов", "📋", Colors.GOLD_2)
         for fold_data in fold_results:
             fold_time = fold_data['training_time']
-            print_info_line(f"Фолд {fold_data['fold']}",
-                            f"AUC: {fold_data['best_val_auc']:.4f}, ACC: {fold_data['best_val_accuracy']:.4f}, "
-                            f"Эпох: {fold_data['epochs_trained']}, Время: {fold_time / 60:.1f}м",
-                            "📝", Colors.BRIGHT_WHITE, Colors.BRIGHT_LIME)
+            fold_value = (
+                f"{Colors.GOLD_4}AUC:{Colors.RESET} {Colors.GOLD_1}{fold_data['best_val_auc']:.4f}{Colors.RESET}, "
+                f"{Colors.BRIGHT_GREEN}ACC:{Colors.RESET} {Colors.GOLD_3}{fold_data['best_val_accuracy']:.4f}{Colors.RESET}, "
+                f"{Colors.TEAL_3}Эпох:{Colors.RESET} {Colors.BRIGHT_WHITE}{fold_data['epochs_trained']}{Colors.RESET}, "
+                f"{Colors.BRIGHT_PURPLE}Время:{Colors.RESET} {Colors.LAVENDER}{fold_time / 60:.1f}м{Colors.RESET}")
+
+            print_info_line(f"Фолд {fold_data['fold']}", fold_value, "📝",
+                            Colors.BLUE_3, Colors.RESET)
         print()
 
     @staticmethod
@@ -530,15 +534,15 @@ def print_startup_header() -> None:
     """
     Выводит стартовый заголовок программы.
     """
-    print_section_header("ЗАПУСК ОБУЧЕНИЯ WIN-PREDICTOR V1", "🚀", color=Colors.BRIGHT_LAVENDER)
+    print_section_header("ЗАПУСК ОБУЧЕНИЯ WIN-PREDICTOR V1", "🚀", color=Colors.VIOLET_2)
     print_info_line("Версия модели", "Win Prediction v1", "🤖",
-                    Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN)
+                    Colors.BLUE_3, Colors.BRIGHT_CYAN)
     print_info_line("Тип валидации", "K-Fold Cross Validation", "🧪",
-                    Colors.BRIGHT_WHITE, Colors.BRIGHT_BLUE)
+                    Colors.BLUE_3, Colors.BRIGHT_GREEN)
     print_info_line("Архитектура", "Hero Embedding + Dense Neural Network", "🧠",
-                    Colors.BRIGHT_WHITE, Colors.BRIGHT_PURPLE)
+                    Colors.BLUE_3, Colors.LAVENDER)
     print_info_line("Фреймворк", "Keras (TensorFlow)", "🔧",
-                    Colors.BRIGHT_WHITE, Colors.BRIGHT_GOLD)
+                    Colors.BLUE_3, Colors.GOLD_3)
 
 
 def validate_paths(data_file: str, output_dir: Path) -> bool:
@@ -552,7 +556,7 @@ def validate_paths(data_file: str, output_dir: Path) -> bool:
     Returns:
         bool: True если все проверки пройдены, False иначе
     """
-    print_subsection_header("Проверка путей и файлов", "🔍", Colors.BRIGHT_LAVENDER)
+    print_subsection_header("Проверка путей и файлов", "🔍", Colors.AMBER_2)
 
     # Проверка HDF5 файла
     data_file_path = Path(data_file)
@@ -561,9 +565,12 @@ def validate_paths(data_file: str, output_dir: Path) -> bool:
         return False
 
     file_size_mb = data_file_path.stat().st_size / (1024 * 1024)
-    print_info_line("HDF5 файл", data_file_path.name, "🗃️", value_color=Colors.BRIGHT_GREEN)
-    print_info_line("Размер файла", f"{file_size_mb:.2f} MB", "📏", value_color=Colors.BRIGHT_CYAN)
-    print_info_line("Полный путь", str(data_file_path), "📂", value_color=Colors.BRIGHT_BLUE)
+    print_info_line("HDF5 файл", data_file_path.name, "🗃️",
+                    Colors.BLUE_3, Colors.BRIGHT_GREEN)
+    print_info_line("Размер файла", f"{file_size_mb:.2f} MB", "📏",
+                    Colors.BLUE_3, Colors.BRIGHT_WHITE)
+    print_info_line("Полный путь", str(data_file_path), "📂",
+                    Colors.BLUE_3, Colors.AMBER_4)
 
     # Создание и проверка директории моделей
     try:
@@ -573,8 +580,10 @@ def validate_paths(data_file: str, output_dir: Path) -> bool:
         test_file.touch()
         test_file.unlink()
 
-        print_info_line("Директория моделей", output_dir.name, "💾", value_color=Colors.BRIGHT_GREEN)
-        print_info_line("Полный путь", str(output_dir), "📂", value_color=Colors.BRIGHT_BLUE)
+        print_info_line("Директория моделей", output_dir.name, "💾",
+                        Colors.BLUE_3, Colors.BRIGHT_GREEN)
+        print_info_line("Полный путь", str(output_dir), "📂",
+                        Colors.BLUE_3, Colors.AMBER_4)
         print()
     except (OSError, PermissionError) as e:
         print_status_message(f"Невозможно создать/использовать директорию моделей: {e}", "error", "❌")
