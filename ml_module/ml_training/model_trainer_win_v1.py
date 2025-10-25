@@ -40,7 +40,7 @@ from utils.console import (
 
 # === КОНСТАНТЫ ФАЙЛОВ ===
 HDF5_FILENAME = "HDF5_dataset_{version}_main.h5"  # Имя HDF5 файла с данными
-MODEL_FILENAME = "model_win_v1.keras"  # Имя сохраняемой модели
+MODEL_FILENAME = "model_win_v1_{version}.keras"  # Имя сохраняемой модели
 
 # === КОНСТАНТЫ АРХИТЕКТУРЫ ===
 DEFAULT_HIDDEN_UNITS = [512, 256]  # Размеры скрытых Dense слоев
@@ -49,7 +49,7 @@ DEFAULT_DROPOUT_RATE = 0.15  # Коэффициент dropout для регул�
 DEFAULT_L2_REG = 0.00015  # Коэффициент L2 регуляризации весов
 
 # === КОНСТАНТЫ ОБУЧЕНИЯ ===
-DEFAULT_EPOCHS = 1000  # Максимальное количество эпох обучения
+DEFAULT_EPOCHS = 2  # Максимальное количество эпох обучения
 DEFAULT_BATCH_SIZE = 512  # Размер батча при обучении
 DEFAULT_LEARNING_RATE = 0.0005  # Начальная скорость обучения оптимизатора
 N_FOLDS = 5  # Количество фолдов для кросс-валидации
@@ -87,6 +87,7 @@ class ModelTrainerWinV1:
         dropout_rate (float): Коэффициент dropout
         l2_reg (float): Коэффициент L2 регуляризации
     """
+
     def __init__(self,
                  batch_size: int = DEFAULT_BATCH_SIZE,
                  epochs: int = DEFAULT_EPOCHS,
@@ -137,7 +138,9 @@ class ModelTrainerWinV1:
             base_model_path (str): Базовый путь для сохранения моделей
 
         Raises:
-            Exception: При критических ошибках обучения
+            FileNotFoundError: Если HDF5 файл не найден
+            OSError: Если не удается получить доступ к файлу
+            ValueError: Если данные некорректны (пустой датасет и т.д.)
         """
         print_section_header("ПОДГОТОВКА ДАННЫХ К ОБУЧЕНИЮ", "📦", color=Colors.BRIGHT_BLUE)
 
@@ -145,8 +148,8 @@ class ModelTrainerWinV1:
             # Вывод конфигурации
             self._print_model_configuration()
 
-            # Загрузка данных
-            features_all, labels_all = self._prepare_training_data(data_file_path)
+            # Загрузка данных напрямую через DataLoader
+            features_all, labels_all = self.loader.load_data_from_hdf5(data_file_path)
 
             # Инициализация кросс-валидации
             total_samples = features_all['radiant_heroes'].shape[0]
@@ -172,8 +175,18 @@ class ModelTrainerWinV1:
             self._print_ensemble_summary(fold_results)
             print_status_message("Обучение ансамбля успешно завершено!", "success")
 
+        except (FileNotFoundError, OSError) as e:
+            error_msg = f"Ошибка доступа к файлам: {str(e)}"
+            print_status_message(error_msg, "error")
+            raise
+
+        except ValueError as e:
+            error_msg = f"Ошибка данных: {str(e)}"
+            print_status_message(error_msg, "error")
+            raise
+
         except Exception as e:
-            error_msg = f"Критическая ошибка при обучении: {str(e)}"
+            error_msg = f"Непредвиденная ошибка при обучении: {str(e)}"
             print_status_message(error_msg, "error")
             import traceback
             traceback.print_exc()
@@ -297,30 +310,6 @@ class ModelTrainerWinV1:
 
         return model
 
-    def _prepare_training_data(self, data_path: str) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
-        """
-        Загружает данные из HDF5 файла через DataLoaderWinV1.
-
-        Args:
-            data_path (str): Путь к HDF5 файлу
-
-        Returns:
-            Tuple[Dict[str, np.ndarray], np.ndarray]:
-                - features: {'radiant_heroes': (N, 5), 'dire_heroes': (N, 5)}
-                - labels: метки результатов, shape (N,)
-
-        Raises:
-            ValueError: Если файл пуст или не содержит данных
-        """
-        print_subsection_header("Загрузка данных из HDF5", "📂", Colors.BRIGHT_CYAN)
-        features_all, labels_all = self.loader.load_data_from_hdf5(data_path)
-
-        total_samples = features_all['radiant_heroes'].shape[0]
-        if total_samples == 0:
-            raise ValueError("HDF5 файл не содержит данных для обучения")
-
-        return features_all, labels_all
-
     def _train_single_fold(self,
                            fold_num: int,
                            train_idx: np.ndarray,
@@ -379,7 +368,7 @@ class ModelTrainerWinV1:
         # Создание модели
         model = self._build_and_compile_model()
 
-        # Callbacks
+        # Создание Callbacks
         callbacks_list = self._create_callbacks()
 
         # Обучение
@@ -487,10 +476,7 @@ class ModelTrainerWinV1:
     @staticmethod
     def _print_ensemble_summary(fold_results: List[Dict[str, Any]]) -> None:
         """
-        Выводит итоговую статистику по всему ансамблю.
-
-        Отображает средние метрики, стандартное отклонение
-        и детальную информацию по каждому фолду.
+        Выводит итоговую статистику по всему ансамблю: отображает средние метрики, стандартное отклонение.
 
         Args:
             fold_results (List[Dict[str, Any]]): Результаты всех фолдов
@@ -535,9 +521,6 @@ class ModelTrainerWinV1:
 
         Returns:
             str: Путь для сохранения модели фолда
-
-        Example:
-            "models/model.keras" -> "models/model_fold_1.keras"
         """
         path_obj = Path(base_path)
         return str(path_obj.with_name(f"{path_obj.stem}_fold_{fold_num}{path_obj.suffix}"))
@@ -609,20 +592,13 @@ if __name__ == "__main__":
     models_dir = Path(__file__).parent.parent / "models"
 
     hdf5_file_path = str(data_dir / HDF5_FILENAME.format(version=DOTA_VERSION))
-    model_output_path = str(models_dir / MODEL_FILENAME)
+    model_output_path = str(models_dir / MODEL_FILENAME.format(version=DOTA_VERSION))
 
     # Проверка путей
     if not validate_paths(hdf5_file_path, models_dir):
         print_status_message("Проверка путей не пройдена. Завершение программы.", "error")
         sys.exit(1)
 
-    print_status_message("Инициализация тренера модели...", "info")
-
     # Создание тренера и запуск обучения
     trainer = ModelTrainerWinV1(epochs=DEFAULT_EPOCHS)
-
-    print_info_line("Win v1 Data Loader инициализирован",
-                    "",
-                    "🧙‍♂️", value_color=Colors.BRIGHT_GREEN)
-
     trainer.train(data_file_path=hdf5_file_path, base_model_path=model_output_path)

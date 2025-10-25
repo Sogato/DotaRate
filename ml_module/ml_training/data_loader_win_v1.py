@@ -14,6 +14,7 @@ HDF5 файлов, базы данных и одиночных матчей. П�
 1. HDF5 файлы:
    - Данные уже содержат плотные индексы
    - Применяется сортировка (опционально)
+   - Проверяется валидность данных (непустой датасет)
    - Возвращает: (features_dict, labels)
 
 2. База данных (множество матчей):
@@ -37,7 +38,7 @@ from typing import Dict, List, Union, Tuple, Set
 
 from config import EXCLUDED_HERO_IDS
 from utils.hero_mapper import HeroMapper
-from utils.console import print_info_line, Colors
+from utils.console import print_info_line, print_subsection_header, Colors
 
 # === КОНСТАНТЫ ДЛЯ МОДЕЛИ WIN V1 ===
 SORT_TEAM_HEROES = True  # Флаг сортировки составов команд
@@ -115,16 +116,31 @@ class DataLoaderWinV1:
             Tuple[Dict[str, np.ndarray], np.ndarray]:
                 - features: {'radiant_heroes': (N, 5), 'dire_heroes': (N, 5)}, dtype int32
                 - labels: shape (N,), dtype float32
+
+        Raises:
+            FileNotFoundError: Если HDF5 файл не найден
+            OSError: Если не удается получить доступ к файлу
+            ValueError: Если HDF5 файл не содержит данных для обучения
         """
+        print_subsection_header("Загрузка данных из HDF5", "📂", Colors.BRIGHT_CYAN)
         print_info_line("Полный путь", hdf5_path, "📂", value_color=Colors.BRIGHT_BLUE)
         print_info_line("Название файла", Path(hdf5_path).name, "🗃️", value_color=Colors.BRIGHT_CYAN)
 
-        with h5py.File(hdf5_path, 'r') as h5_file:
-            radiant_all = h5_file['radiant_heroes'][:].astype(np.int32)
-            dire_all = h5_file['dire_heroes'][:].astype(np.int32)
-            labels_all = h5_file['radiant_win'][:].astype(np.float32)
+        try:
+            with h5py.File(hdf5_path, 'r') as h5_file:
+                radiant_all = h5_file['radiant_heroes'][:].astype(np.int32)
+                dire_all = h5_file['dire_heroes'][:].astype(np.int32)
+                labels_all = h5_file['radiant_win'][:].astype(np.float32)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"HDF5 файл не найден: {hdf5_path}")
+        except OSError as e:
+            raise OSError(f"Ошибка доступа к HDF5 файлу: {e}")
 
         total_matches = radiant_all.shape[0]
+
+        # Проверка на пустой датасет
+        if total_matches == 0:
+            raise ValueError("HDF5 файл не содержит данных для обучения")
 
         # Обработка составов (сортировка если включена)
         for match_idx in range(total_matches):
