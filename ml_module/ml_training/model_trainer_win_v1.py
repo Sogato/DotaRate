@@ -13,29 +13,43 @@
 - Выход: вероятность победы Radiant (sigmoid)
 """
 import os
-
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 
+# Стандартные библиотеки
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Any, Dict, List, Optional
 
+# Сторонние библиотеки
 import numpy as np
-from sklearn.model_selection import StratifiedKFold
-from keras import Model, Input, layers, callbacks as keras_callbacks, regularizers
+from keras import Input, Model
+from keras.backend import clear_session as keras_clear_session
+from keras.callbacks import Callback, EarlyStopping, ReduceLROnPlateau
+from keras.layers import (
+    Activation,
+    BatchNormalization,
+    Concatenate,
+    Dense,
+    Dropout,
+    Embedding,
+    GlobalAveragePooling1D,
+    Rescaling,
+)
 from keras.metrics import AUC, Precision, Recall
 from keras.optimizers import Adam
-import keras.backend as backend
+from keras.regularizers import L2
+from sklearn.model_selection import StratifiedKFold
 
+# Локальные импорты
 from ml_training.data_loader_win_v1 import DataLoaderWinV1
 from config import DOTA_VERSION, TEAM_SIZE
 from utils.console import (
     Colors,
-    print_section_header,
-    print_subsection_header,
     print_info_line,
-    print_status_message
+    print_section_header,
+    print_status_message,
+    print_subsection_header,
 )
 
 # === КОНСТАНТЫ ФАЙЛОВ ===
@@ -252,10 +266,10 @@ class ModelTrainerWinV1:
         dire_input = Input(shape=(TEAM_SIZE,), dtype='int32', name='dire_heroes')
 
         # Общий embedding слой для героев
-        hero_embedding = layers.Embedding(
+        hero_embedding = Embedding(
             input_dim=self.loader.hero_mapper.total_heroes,
             output_dim=self.embedding_dim,
-            embeddings_regularizer=regularizers.L2(self.l2_reg),
+            embeddings_regularizer=L2(self.l2_reg),
             name='hero_embedding'
         )
 
@@ -264,30 +278,31 @@ class ModelTrainerWinV1:
         dire_emb = hero_embedding(dire_input)
 
         # Sum pooling через GlobalAveragePooling × TEAM_SIZE
-        radiant_mean = layers.GlobalAveragePooling1D(name='radiant_avg')(radiant_emb)
-        dire_mean = layers.GlobalAveragePooling1D(name='dire_avg')(dire_emb)
+        radiant_mean = GlobalAveragePooling1D(name='radiant_avg')(radiant_emb)
+        dire_mean = GlobalAveragePooling1D(name='dire_avg')(dire_emb)
 
-        radiant_pooled = layers.Lambda(lambda x: x * TEAM_SIZE, name='radiant_sum')(radiant_mean)
-        dire_pooled = layers.Lambda(lambda x: x * TEAM_SIZE, name='dire_sum')(dire_mean)
+        # Используем Rescaling (вместо Lambda для безопасной сериализации)
+        radiant_pooled = Rescaling(scale=TEAM_SIZE, name='radiant_sum')(radiant_mean)
+        dire_pooled = Rescaling(scale=TEAM_SIZE, name='dire_sum')(dire_mean)
 
         # Конкатенация векторов команд
-        combined = layers.Concatenate(name='concatenate')([radiant_pooled, dire_pooled])
+        combined = Concatenate(name='concatenate')([radiant_pooled, dire_pooled])
 
         # Скрытые слои: Dense → BatchNorm → ReLU → Dropout
         x = combined
         for layer_idx, units in enumerate(self.hidden_units):
-            x = layers.Dense(
+            x = Dense(
                 units,
                 activation=None,
-                kernel_regularizer=regularizers.L2(self.l2_reg),
+                kernel_regularizer=L2(self.l2_reg),
                 name=f'dense_{layer_idx}'
             )(x)
-            x = layers.BatchNormalization(name=f'bn_{layer_idx}')(x)
-            x = layers.Activation('relu', name=f'relu_{layer_idx}')(x)
-            x = layers.Dropout(self.dropout_rate, name=f'dropout_{layer_idx}')(x)
+            x = BatchNormalization(name=f'bn_{layer_idx}')(x)
+            x = Activation('relu', name=f'relu_{layer_idx}')(x)
+            x = Dropout(self.dropout_rate, name=f'dropout_{layer_idx}')(x)
 
         # Выходной слой
-        output = layers.Dense(1, activation='sigmoid', name='output')(x)
+        output = Dense(1, activation='sigmoid', name='output')(x)
 
         # Создание модели
         model = Model(
@@ -400,7 +415,7 @@ class ModelTrainerWinV1:
         )
 
         # Очистка памяти
-        backend.clear_session()
+        keras_clear_session()
         del model
 
         return {
@@ -416,7 +431,7 @@ class ModelTrainerWinV1:
         }
 
     @staticmethod
-    def _create_callbacks() -> List[keras_callbacks.Callback]:
+    def _create_callbacks() -> List[Callback]:
         """
         Создает список callbacks для контроля обучения.
 
@@ -428,7 +443,7 @@ class ModelTrainerWinV1:
             List[Callback]: Список настроенных callbacks
         """
         return [
-            keras_callbacks.EarlyStopping(
+            EarlyStopping(
                 monitor=EARLY_STOPPING_MONITOR,
                 mode=EARLY_STOPPING_MODE,
                 patience=EARLY_STOPPING_PATIENCE,
@@ -436,7 +451,7 @@ class ModelTrainerWinV1:
                 restore_best_weights=True,
                 verbose=1
             ),
-            keras_callbacks.ReduceLROnPlateau(
+            ReduceLROnPlateau(
                 monitor=REDUCE_LR_MONITOR,
                 factor=REDUCE_LR_FACTOR,
                 patience=REDUCE_LR_PATIENCE,
