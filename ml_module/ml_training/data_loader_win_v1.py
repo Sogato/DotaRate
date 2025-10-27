@@ -6,7 +6,7 @@ HDF5 файлов, базы данных и одиночных матчей. П�
 в единый формат для входного слоя модели Win v1.
 
 Задача модели Win v1:
-- Бинарная классификация: победа Radiant (1) или Dire (0)
+- Бинарная классификация: победа команды Radiant (1) или команды Dire (0)
 - Входные признаки: составы команд по 5 героев (плотные индексы)
 - Целевая переменная: radiant_win (наличие зависит от источника)
 
@@ -30,17 +30,25 @@ HDF5 файлов, базы данных и одиночных матчей. П�
 Все методы возвращают единый формат Dict для признаков:
 {'radiant_heroes': np.ndarray, 'dire_heroes': np.ndarray}
 """
-from pathlib import Path
 
-import h5py
-import numpy as np
+# Стандартные библиотеки
+from pathlib import Path
 from typing import Dict, List, Union, Tuple, Set
 
-from config import EXCLUDED_HERO_IDS
-from utils.hero_mapper import HeroMapper
-from utils.console import print_info_line, print_subsection_header, Colors
+# Сторонние библиотеки
+import h5py
+import numpy as np
 
-# === КОНСТАНТЫ ДЛЯ МОДЕЛИ WIN V1 ===
+# Локальные импорты
+from utils.hero_mapper import HeroMapper
+from config import EXCLUDED_HERO_IDS
+from utils.console import (
+    Colors,
+    print_info_line,
+    print_subsection_header,
+)
+
+# === КОНСТАНТЫ LOADER WIN V1 ===
 SORT_TEAM_HEROES = True  # Флаг сортировки составов команд
 
 

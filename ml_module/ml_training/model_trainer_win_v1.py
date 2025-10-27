@@ -5,12 +5,26 @@
 разбиение данных, создание архитектуры нейросети, компиляцию, обучение
 отдельных моделей и сбор итоговой статистики.
 
-Архитектура модели Win v1:
-- Входы: составы команд по 5 героев (плотные индексы)
-- Embedding слой: преобразование индексов в векторы размерности embedding_dim
-- Pooling: Sum pooling для агрегации векторов команды
-- Hidden layers: Dense → BatchNorm → ReLU → Dropout
-- Выход: вероятность победы Radiant (sigmoid)
+Win v1 представляет собой архитектуру, основанную на условном подходе
+"bag-of-heroes" (мешок героев), где модель обучается предсказывать исход матча
+исключительно по составам команд без явного моделирования синергий или контр-пиков.
+
+Ключевые особенности:
+- Вход: плотные индексы героев (5 Radiant + 5 Dire)
+- Embedding слой: общий для обеих команд, преобразует индексы в векторы
+- Sum Pooling: агрегация через GlobalAveragePooling × TEAM_SIZE (суммирование векторов команды)
+- Представление команды: единый вектор без учёта взаимодействий между героями
+- MLP: последовательность Dense → BatchNorm → ReLU → Dropout слоёв
+- Выходной слой: sigmoid активация для вероятности победы Radiant
+
+Архитектурные ограничения:
+- Модель не различает связи между героями (синергии внутри команды или контр-пиков между командами)
+- Модель не учитывает позиции/роли героев или их порядок в пике
+- Общий embedding делает представления героев одинаковыми вне зависимости от стороны (Radiant/Dire)
+- Подход основан на усреднении "силы" состава без явных попарных взаимодействий
+
+Эта архитектура служит отправной точкой для оценки предсказательной способности
+моделей на основе только составов героев с минимальной архитектурной сложностью.
 """
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
@@ -247,11 +261,18 @@ class ModelTrainerWinV1:
 
         Архитектура:
         1. Входы: radiant_heroes [5] + dire_heroes [5] (int32 индексы)
-        2. Embedding [num_heroes → embedding_dim] с L2 регуляризацией
-        3. Sum Pooling: GlobalAveragePooling × TEAM_SIZE для каждой команды
-        4. Concatenate → [2 × embedding_dim]
-        5. Скрытые слои: Dense → BatchNorm → ReLU → Dropout (повторяется N раз)
-        6. Выходной слой: Dense(1, sigmoid) → вероятность [0..1]
+        2. Shared Embedding [num_heroes → embedding_dim] с L2 регуляризацией
+        3. Sum Pooling: GlobalAveragePooling1D × TEAM_SIZE для каждой команды
+        4. Concatenate → объединение представлений команд [2 × embedding_dim]
+        5. MLP: Dense → BatchNorm → ReLU → Dropout (повторяется N раз)
+        6. Выходной слой: Dense(1, sigmoid) → вероятность победы Radiant
+
+        Особенности реализации:
+        - Sum pooling выбран для создания permutation-invariant представления команды
+          (порядок героев не влияет на результат). Это простая агрегация, которая
+          суммирует векторы всех героев команды без учета их взаимодействий.
+        - Shared embedding: один embedding слой для обеих команд, что означает
+          одинаковое представление героя вне зависимости от стороны (Radiant/Dire).
 
         Компиляция:
         - Loss: binary_crossentropy
@@ -281,14 +302,14 @@ class ModelTrainerWinV1:
         radiant_mean = GlobalAveragePooling1D(name='radiant_avg')(radiant_emb)
         dire_mean = GlobalAveragePooling1D(name='dire_avg')(dire_emb)
 
-        # Используем Rescaling (вместо Lambda для безопасной сериализации)
+        # Rescaling (вместо Lambda для безопасной сериализации)
         radiant_pooled = Rescaling(scale=TEAM_SIZE, name='radiant_sum')(radiant_mean)
         dire_pooled = Rescaling(scale=TEAM_SIZE, name='dire_sum')(dire_mean)
 
         # Конкатенация векторов команд
         combined = Concatenate(name='concatenate')([radiant_pooled, dire_pooled])
 
-        # Скрытые слои: Dense → BatchNorm → ReLU → Dropout
+        # Скрытые слои: последовательность Dense → BatchNorm → ReLU → Dropout
         x = combined
         for layer_idx, units in enumerate(self.hidden_units):
             x = Dense(
@@ -554,7 +575,7 @@ def print_startup_header() -> None:
                     Colors.BLUE_3, Colors.BRIGHT_CYAN)
     print_info_line("Тип валидации", "K-Fold Cross Validation", "🧪",
                     Colors.BLUE_3, Colors.BRIGHT_GREEN)
-    print_info_line("Архитектура", "Hero Embedding + Dense Neural Network", "🧠",
+    print_info_line("Архитектура", "Hero Embedding + MLP", "🧠",
                     Colors.BLUE_3, Colors.LAVENDER)
     print_info_line("Фреймворк", "Keras (TensorFlow)", "🔧",
                     Colors.BLUE_3, Colors.GOLD_3)
