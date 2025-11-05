@@ -30,28 +30,43 @@
 - Включает детальную валидацию с проверкой целостности данных
 """
 
+# Стандартные библиотеки
 import os
 import time
-import numpy as np
+from typing import Any, Dict, List, Tuple
+
+# Сторонние библиотеки
 import h5py
-from typing import List, Tuple, Dict, Any
-from sqlalchemy import create_engine, select, func
+import numpy as np
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
+# Локальные импорты
 from config import (
-    DATASET_DATABASE_URL, EXCLUDED_HERO_IDS, ROLE_MAPPING, RADIANT_TEAM, DIRE_TEAM,
-    TEAM_SIZE, TEST_DATASET_SIZE, CHUNK_SIZE, VALIDATION_SAMPLE_SIZE, HDF5_FILE_NAME, DOTA_VERSION
+    DATASET_DATABASE_URL,
+    DIRE_TEAM,
+    DOTA_VERSION,
+    EXCLUDED_HERO_IDS,
+    RADIANT_TEAM,
+    ROLE_MAPPING,
+    TEAM_SIZE,
 )
 from data_bases.dataset.models import Match, MatchPlayer
-from utils.hero_mapper import HeroMapper
 from utils.console import (
     Colors,
-    print_section_header,
-    print_subsection_header,
     print_info_line,
     print_progress_bar,
-    print_status_message
+    print_section_header,
+    print_status_message,
+    print_subsection_header,
 )
+from utils.hero_mapper import HeroMapper
+
+# === НАСТРОЙКИ HDF5 ПРЕПРОЦЕССОРА ===
+HDF5_FILE_NAME = "HDF5_dataset"     # Базовое имя выходных файлов
+CHUNK_SIZE = 100_000                # Размер чанка для потоковой обработки
+TEST_DATASET_SIZE = 10_000          # Размер тестовой выборки
+VALIDATION_SAMPLE_SIZE = 10_000     # Количество записей для валидации
 
 
 class HDF5Preprocessor:

@@ -1,43 +1,52 @@
 """
-Модуль для сбора и анализа данных матчей Dota 2 из Steam API.
+Модуль сбора и анализа данных матчей Dota 2 из Steam API.
 
-Основные функции:
-- Получение данных матчей из Steam API
-- Фильтрация матчей по различным критериям
-- Анализ игроков и назначение ролей
-- Детекция руинеров в матчах
-- Сохранение обработанных данных в базу данных
+Модуль обеспечивает полный цикл работы с данными матчей:
+получение через Steam API, многоступенчатую фильтрацию, анализ игроков,
+обнаружение аномалий (руинеров, мёртвых матчей) и сохранение в базу данных.
+
+Основные этапы обработки:
+1. Первичная фильтрация: базовые критерии (время, режим, длительность, состав)
+2. Вторичная фильтрация: анализ активности, назначение ролей, детекция руинеров
+3. Формирование записей для БД с полной информацией о матче и игроках
+4. Пакетное сохранение с контролем производительности
+
+Архитектурные особенности:
+- Chunk-based saving: накопление и сохранение матчей батчами для производительности
+- Role assignment: алгоритм определения ролей на основе support_score (предметы + экономика)
+- Ruiner detection: взвешенная сумма факторов обнаружения руинеров с системой исключений для героев
+- Dead match detection: фильтрация аномальных матчей
 """
 
+# Стандартные библиотеки
 import time
-import requests
 from datetime import datetime
 from collections import Counter
+from typing import Dict, List, Tuple, Set, Any, Optional
 
-# Импорты для работы с базой данных
+# Сторонние библиотеки
+import requests
 from sqlalchemy import create_engine, func
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import IntegrityError
 
-# Импорт моделей базы данных
+# Локальные импорты
 from data_bases.dataset.models import Match, MatchPlayer
 from data_bases.heroes.models import Hero
-from config import (DATASET_DATABASE_URL, HEROES_DATABASE_URL, STEAM_API_KEY, STEAM_API_MATCH_HISTORY_URL,
-                    STARTING_MATCH_SEQUENCE_NUMBER, TARGET_MATCHES_COUNT, DATABASE_SAVE_CHUNK_SIZE,
-                    BURST_TIME_TIMESTAMP, MATCHES_PER_API_REQUEST, API_REQUEST_DELAY,
-                    MAX_CONSECUTIVE_INCOMPLETE_RESPONSES, ENABLE_DETAILED_STATISTICS, ENABLE_RUINER_LOGGING,
-                    ENABLE_ROLE_LOGGING, REQUIRED_MATCH_FIELDS, REQUIRED_PLAYER_FIELDS, ALLOWED_GAME_MODES,
-                    ALLOWED_LOBBY_TYPES, MINIMUM_MATCH_DURATION, NUMBER_OF_PLAYERS_PER_TEAM, MAX_LEVEL_1_RATIO,
-                    MAX_ZERO_LASTHITS_RATIO, MIN_TOTAL_LAST_HITS, SUPPORT_ITEM_IDS, HERO_ITEM_EXCEPTIONS,
-                    HERO_SUPPORT_SCORE_EXCEPTIONS, SUPPORT_ITEMS_WEIGHT, SUPPORT_SCORE_EXCEPTION_WEIGHT,
-                    NET_WORTH_WEIGHT, LAST_HITS_WEIGHT, GPM_WEIGHT, XPM_WEIGHT, CORE_EXPECTED_KDA, CORE_KDA_TOLERANCE,
-                    SUPPORT_EXPECTED_KDA, SUPPORT_KDA_TOLERANCE, INCOME_MINIMUM_THRESHOLD, GPM_CALCULATION_START_MINUTE,
-                    CORE_BASE_GPM, CORE_GPM_GROWTH_RATE, CORE_MAX_GPM, SUPPORT_BASE_GPM, SUPPORT_GPM_GROWTH_RATE,
-                    SUPPORT_MAX_GPM, RUINER_DETECTION_THRESHOLD, RUINER_LOGGING_THRESHOLD, RUINER_EMPTY_SLOTS_LIMIT,
-                    RUINER_SAME_ITEMS_LIMIT, TEAM_DEATH_RATIO_WEIGHT, KDA_SCORE_WEIGHT, INCOME_SCORE_WEIGHT,
-                    CONTRIBUTION_SCORE_WEIGHT, HERO_RUINER_EXCEPTIONS)
-
-# Импорт утилит для консольного вывода
+from config import (
+    DATASET_DATABASE_URL, HEROES_DATABASE_URL, STEAM_API_KEY, STEAM_API_MATCH_HISTORY_URL,
+    STARTING_MATCH_SEQUENCE_NUMBER, TARGET_MATCHES_COUNT, DATABASE_SAVE_CHUNK_SIZE,
+    BURST_TIME_TIMESTAMP, REQUIRED_MATCH_FIELDS, REQUIRED_PLAYER_FIELDS, ALLOWED_GAME_MODES,
+    ALLOWED_LOBBY_TYPES, MINIMUM_MATCH_DURATION, TEAM_SIZE, MAX_LEVEL_1_RATIO,
+    MAX_ZERO_LASTHITS_RATIO, MIN_TOTAL_LAST_HITS, SUPPORT_ITEM_IDS, HERO_ITEM_EXCEPTIONS,
+    HERO_SUPPORT_SCORE_EXCEPTIONS, SUPPORT_ITEMS_WEIGHT, SUPPORT_SCORE_EXCEPTION_WEIGHT,
+    NET_WORTH_WEIGHT, LAST_HITS_WEIGHT, GPM_WEIGHT, XPM_WEIGHT, CORE_EXPECTED_KDA, CORE_KDA_TOLERANCE,
+    SUPPORT_EXPECTED_KDA, SUPPORT_KDA_TOLERANCE, INCOME_MINIMUM_THRESHOLD, GPM_CALCULATION_START_MINUTE,
+    CORE_BASE_GPM, CORE_GPM_GROWTH_RATE, CORE_MAX_GPM, SUPPORT_BASE_GPM, SUPPORT_GPM_GROWTH_RATE,
+    SUPPORT_MAX_GPM, RUINER_DETECTION_THRESHOLD, RUINER_LOGGING_THRESHOLD, RUINER_EMPTY_SLOTS_LIMIT,
+    RUINER_SAME_ITEMS_LIMIT, TEAM_DEATH_RATIO_WEIGHT, KDA_SCORE_WEIGHT, INCOME_SCORE_WEIGHT,
+    CONTRIBUTION_SCORE_WEIGHT, HERO_RUINER_EXCEPTIONS
+)
 from utils.console import (
     Colors,
     print_section_header,
@@ -47,24 +56,33 @@ from utils.console import (
     print_status_message
 )
 
-# Основная БД (датасет матчей dota 2)
+# === ПОДКЛЮЧЕНИЯ К БАЗАМ ДАННЫХ ===
 dataset_engine = create_engine(DATASET_DATABASE_URL)
 DatasetSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=dataset_engine)
 
-# БД героев (справочная информация)
 heroes_engine = create_engine(HEROES_DATABASE_URL)
 HeroesSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=heroes_engine)
 
-# Глобальный кэш для героев (загружается один раз при старте кода)
-HEROES_CACHE = {}
+# === ГЛОБАЛЬНЫЙ КЭШ ===
+HEROES_CACHE = {}  # {hero_id: localized_name}, загружается при старте
+
+# === КОНСТАНТЫ ОТЛАДКИ ===
+ENABLE_DETAILED_STATISTICS = False  # Детальная статистика обработки каждого API вызова
+ENABLE_RUINER_LOGGING = False       # Подробное логирование процесса детекции руинеров
+ENABLE_ROLE_LOGGING = False         # Логирование процесса назначения ролей игрокам
+
+# === КОНСТАНТЫ API ===
+API_REQUEST_DELAY = 4                       # Задержка между запросами в секундах
+MATCHES_PER_API_REQUEST = 100               # Количество матчей за один запрос (макс 100)
+MAX_CONSECUTIVE_INCOMPLETE_RESPONSES = 5    # Лимит неполных ответов API подряд
 
 
-def initialize_heroes_cache():
+def initialize_heroes_cache() -> bool:
     """
     Инициализирует кэш героев из базы данных для быстрого доступа.
 
-    Загружает всех героев из БД в память для избежания множественных запросов
-    при обработке матчей. Кэш представляет собой словарь {hero_id: hero_name}.
+    Загружает всех героев из БД в память в формате {hero_id: localized_name}
+    для избежания множественных запросов при обработке матчей.
 
     Returns:
         bool: True если кэш успешно загружен, False в случае ошибки
@@ -79,7 +97,6 @@ def initialize_heroes_cache():
         if ENABLE_DETAILED_STATISTICS:
             print_status_message("Загрузка данных героев из базы данных...", "info", "📚")
 
-        # Получаем всех героев из БД
         heroes = heroes_session.query(Hero).all()
 
         if not heroes:
@@ -116,7 +133,7 @@ def get_hero_name_by_id(hero_id: int) -> str:
     return HEROES_CACHE.get(hero_id, f"Unknown Hero (ID: {hero_id})")
 
 
-def analyze_database_state(session) -> dict:
+def analyze_database_state(session: Session) -> Dict[str, Any]:
     """
     Анализирует текущее состояние базы данных и определяет стратегию сбора данных.
 
@@ -126,13 +143,13 @@ def analyze_database_state(session) -> dict:
     - 'complete': БД уже содержит достаточно матчей
 
     Args:
-        session: Сессия SQLAlchemy для работы с БД
+        session (Session): Сессия SQLAlchemy для работы с БД
 
     Returns:
-        dict: Словарь с информацией о состоянии БД, включающий:
+        Dict[str, Any]: Словарь с информацией о состоянии БД, включающий:
             - is_empty (bool): Пуста ли БД
             - existing_matches_count (int): Количество существующих матчей
-            - max_match_seq_num (int): Максимальный sequence number
+            - max_match_seq_num (int | None): Максимальный sequence number
             - scenario (str): Сценарий действий ('empty'/'continue'/'complete')
             - remaining_needed (int): Сколько матчей еще нужно (для 'continue')
             - next_seq_num (int): Следующий sequence number (для 'continue')
@@ -209,7 +226,7 @@ def analyze_database_state(session) -> dict:
     }
 
 
-def print_collection_configuration_header(database_state: dict):
+def print_collection_configuration_header(database_state: Dict[str, Any]) -> None:
     """
     Выводит заголовок конфигурации сбора данных.
 
@@ -217,10 +234,12 @@ def print_collection_configuration_header(database_state: dict):
     настройки фильтрации и логирования. Пропускает вывод если БД уже заполнена.
 
     Args:
-        database_state (dict): Словарь с информацией о состоянии базы данных
+        database_state (Dict[str, Any]): Словарь с информацией о состоянии базы данных
     """
+
+    # Не выводим заголовок если база данных уже заполнена
     if database_state['scenario'] == 'complete':
-        return  # Не выводим заголовок если база данных уже заполнена
+        return
 
     print_section_header("ЗАПУСК СБОРА ДАННЫХ О МАТЧАХ DOTA 2", "🚀", color=Colors.BRIGHT_MAGENTA)
 
@@ -255,14 +274,14 @@ def print_collection_configuration_header(database_state: dict):
     print_info_line("Минимальная длительность", "20 мин", "⏱️", Colors.BRIGHT_WHITE, Colors.BRIGHT_MINT)
     print_info_line("Разрешённые режимы", f"{len(ALLOWED_GAME_MODES)}", "🎮", Colors.BRIGHT_WHITE,
                     Colors.BRIGHT_CORAL)
-    print_info_line("Разрешённые лобби", f"{len(ALLOWED_LOBBY_TYPES)}", "🏛️", Colors.BRIGHT_WHITE,
+    print_info_line("Разрешённые лобби", f"{len(ALLOWED_LOBBY_TYPES)}", "🛒", Colors.BRIGHT_WHITE,
                     Colors.BRIGHT_CORAL)
 
     # Настройки логирования
     print_subsection_header("Настройки логирования", "📝", Colors.BRIGHT_MAGENTA)
     print_info_line("Детальная статистика", "ВКЛ" if ENABLE_DETAILED_STATISTICS else "ВЫКЛ", "📈",
                     Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN if ENABLE_DETAILED_STATISTICS else Colors.BRIGHT_RED)
-    print_info_line("Логирование руинеров", "ВКЛ" if ENABLE_RUINER_LOGGING else "ВЫКЛ", "📝",
+    print_info_line("Логирование руинеров", "ВКЛ" if ENABLE_RUINER_LOGGING else "ВЫКЛ", "🔍",
                     Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN if ENABLE_RUINER_LOGGING else Colors.BRIGHT_RED)
     print_info_line("Логирование ролей", "ВКЛ" if ENABLE_ROLE_LOGGING else "ВЫКЛ", "👥",
                     Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN if ENABLE_ROLE_LOGGING else Colors.BRIGHT_RED)
@@ -273,7 +292,7 @@ def print_collection_configuration_header(database_state: dict):
 
     print_subsection_header("Предварительная оценка", "⏳", Colors.BRIGHT_YELLOW)
     print_info_line("Примерно API вызовов", f"~{estimated_api_calls:,}", "📡", Colors.BRIGHT_WHITE, Colors.BRIGHT_TEAL)
-    print_info_line("Минимальное время", f"~{estimated_time_minutes / 60:.1f} часов", "⏰", Colors.BRIGHT_WHITE,
+    print_info_line("Примерное время работы", f"~{estimated_time_minutes / 60:.1f} часов", "⏰", Colors.BRIGHT_WHITE,
                     Colors.BRIGHT_LAVENDER)
 
     print()
@@ -281,7 +300,7 @@ def print_collection_configuration_header(database_state: dict):
     print_status_message("НАЧИНАЕМ ПРОЦЕСС СБОРА...", "info", "▶️")
 
 
-def fetch_matches_from_steam_api(last_match_sequence_number: int) -> list:
+def fetch_matches_from_steam_api(last_match_sequence_number: int) -> List[Dict]:
     """
     Выполняет запрос к Steam API для получения пакета матчей.
 
@@ -292,21 +311,18 @@ def fetch_matches_from_steam_api(last_match_sequence_number: int) -> list:
         last_match_sequence_number (int): Последний sequence number для запроса
 
     Returns:
-        list: Список матчей от Steam API или пустой список при отсутствии новых матчей
+        List[Dict]: Список матчей от Steam API или пустой список при отсутствии новых матчей
 
     Note:
         Функция использует бесконечный цикл с обработкой исключений
     """
     while True:
         try:
-            # Формируем URL запроса к Steam API
             url = f"{STEAM_API_MATCH_HISTORY_URL}?start_at_match_seq_num={last_match_sequence_number}&matches_requested={MATCHES_PER_API_REQUEST}&key={STEAM_API_KEY}"
 
-            # Выполняем HTTP запрос с таймаутом
             response = requests.get(url, timeout=30)
-            response.raise_for_status()  # Проверяем статус ответа
+            response.raise_for_status()
 
-            # Извлекаем матчи из JSON ответа
             return response.json().get("result", {}).get("matches", [])
 
         except requests.exceptions.Timeout:
@@ -318,7 +334,7 @@ def fetch_matches_from_steam_api(last_match_sequence_number: int) -> list:
             time.sleep(10)
 
 
-def primary_match_filters(steam_matches: list) -> tuple[list, dict]:
+def primary_match_filters(steam_matches: List[Dict]) -> Tuple[List[Dict], Optional[Dict]]:
     """
     Применяет первичные фильтры к матчам (базовые критерии валидации).
 
@@ -327,15 +343,15 @@ def primary_match_filters(steam_matches: list) -> tuple[list, dict]:
     - Игрового режима (должен быть в ALLOWED_GAME_MODES)
     - Длительности матча (минимум установленный в MINIMUM_MATCH_DURATION)
     - Наличия всех необходимых полей в API
-    - Количества игроков (обычно 5v5)
+    - Количества игроков
 
     Args:
-        steam_matches (list): Список матчей от Steam API
+        steam_matches (List[Dict]): Список матчей от Steam API
 
     Returns:
-        tuple[list, dict]: Кортеж из отфильтрованных матчей и статистики фильтрации
-            - list: Матчи, прошедшие первичную фильтрацию
-            - dict: Статистика исключений (если включено детальное логирование)
+        Tuple[List[Dict], Optional[Dict]]: Кортеж из отфильтрованных матчей и статистики
+            - List[Dict]: Матчи, прошедшие первичную фильтрацию
+            - Optional[Dict]: Статистика исключений (если включено детальное логирование)
     """
     filtered_matches = []
 
@@ -362,13 +378,13 @@ def primary_match_filters(steam_matches: list) -> tuple[list, dict]:
                 filter_stats['excluded_burst_time'] += 1
             continue
 
-        # Фильтр по игровому режиму (только разрешённые режимы)
+        # Фильтр по игровому режиму
         if match.get("game_mode") not in ALLOWED_GAME_MODES:
             if ENABLE_DETAILED_STATISTICS:
                 filter_stats['excluded_game_mode'] += 1
             continue
 
-        # Фильтр по типу лобби (только разрешённые типы)
+        # Фильтр по типу лобби
         if match.get("lobby_type") not in ALLOWED_LOBBY_TYPES:
             if ENABLE_DETAILED_STATISTICS:
                 filter_stats['excluded_lobby_type'] += 1
@@ -391,7 +407,7 @@ def primary_match_filters(steam_matches: list) -> tuple[list, dict]:
         radiant_players = [p for p in players if p.get("team_number") == 0]
         dire_players = [p for p in players if p.get("team_number") == 1]
 
-        if len(radiant_players) != NUMBER_OF_PLAYERS_PER_TEAM or len(dire_players) != NUMBER_OF_PLAYERS_PER_TEAM:
+        if len(radiant_players) != TEAM_SIZE or len(dire_players) != TEAM_SIZE:
             if ENABLE_DETAILED_STATISTICS:
                 filter_stats['excluded_player_count'] += 1
             continue
@@ -411,24 +427,24 @@ def primary_match_filters(steam_matches: list) -> tuple[list, dict]:
     return filtered_matches, filter_stats
 
 
-def secondary_match_filters(steam_matches: list) -> tuple[list, dict]:
+def secondary_match_filters(steam_matches: List[Dict]) -> Tuple[List[Dict], Optional[Dict]]:
     """
     Применяет вторичные фильтры к матчам (сложные критерии анализа).
 
     Вторичная фильтрация включает:
     - Проверку на ливеров (игроков, покинувших матч)
-    - Проверка активности игроков (новая проверка "мёртвых" матчей)
+    - Проверку активности игроков (новая проверка "мёртвых" матчей)
     - Назначение ролей игрокам (core/support)
     - Обнаружение руинеров (игроков, специально саботирующих игровой процесс)
     - Логирование ролей (если включено)
 
     Args:
-        steam_matches (list): Список предварительно отфильтрованных матчей
+        steam_matches (List[Dict]): Список предварительно отфильтрованных матчей
 
     Returns:
-        tuple[list, dict]: Кортеж из финально отфильтрованных матчей и статистики
-            - list: Матчи, прошедшие все фильтры
-            - dict: Статистика исключений (если включено детальное логирование)
+        Tuple[List[Dict], Optional[Dict]]: Кортеж из финально отфильтрованных матчей и статистики
+            - List[Dict]: Матчи, прошедшие все фильтры
+            - Optional[Dict]: Статистика исключений (если включено детальное логирование)
     """
     filtered_matches = []
 
@@ -454,7 +470,7 @@ def secondary_match_filters(steam_matches: list) -> tuple[list, dict]:
                 filter_stats['excluded_leavers'] += 1
             continue
 
-        # Фильтрация мёртвых матчей - исключает аномальные матчи, которые по ошибке попадают в API Steam
+        # Фильтрация мёртвых матчей
         if is_dead_match(players, match.get("match_id", "неизвестен")):
             if ENABLE_DETAILED_STATISTICS:
                 filter_stats['excluded_dead_match'] += 1
@@ -468,7 +484,6 @@ def secondary_match_filters(steam_matches: list) -> tuple[list, dict]:
             radiant_players = assign_player_roles(radiant_players)
             dire_players = assign_player_roles(dire_players)
         except ValueError:
-            # Не удалось корректно назначить роли
             if ENABLE_DETAILED_STATISTICS:
                 filter_stats['excluded_role_assignment'] += 1
             continue
@@ -510,9 +525,9 @@ def secondary_match_filters(steam_matches: list) -> tuple[list, dict]:
         if ENABLE_ROLE_LOGGING:
             print_subsection_header(f"DEBUG | Распределение ролей (Match ID: {match["match_id"]})", "👥",
                                     Colors.BRIGHT_ORANGE)
-            print(f"🌳 {Colors.BRIGHT_GREEN}Команда Radiant: {Colors.RESET}")
+            print(f"🌞 {Colors.BRIGHT_GREEN}Команда Radiant: {Colors.RESET}")
             log_team_role_assignment(radiant_players)
-            print(f"💀 {Colors.BRIGHT_RED}Команда Dire: {Colors.RESET}")
+            print(f"🌑 {Colors.BRIGHT_RED}Команда Dire: {Colors.RESET}")
             log_team_role_assignment(dire_players)
             print()
 
@@ -530,7 +545,7 @@ def secondary_match_filters(steam_matches: list) -> tuple[list, dict]:
     return filtered_matches, filter_stats
 
 
-def is_dead_match(players: list, match_id: str) -> bool:
+def is_dead_match(players: List[Dict], match_id: str) -> bool:
     """
     Определяет, является ли матч "мёртвым" (все игроки покинули игру в начале).
 
@@ -538,14 +553,16 @@ def is_dead_match(players: list, match_id: str) -> bool:
     - Все или почти все игроки на 1 уровне
     - У всех игроков 0 last_hits
     - Минимальные экономические показатели у всех
-    P.S. Иногда вместо мёртвого матча исключается матч с "руинером", что, впрочем, не влияет на основною логику.
 
     Args:
-        players (list): Список игроков матча
+        players (List[Dict]): Список игроков матча
         match_id (str): ID матча для логирования
 
     Returns:
         bool: True если матч "мёртвый", False если нормальный
+
+    Note:
+        Иногда вместо мёртвого матча будет исключаться матч с "руинером"
     """
     if not players:
         return True
@@ -615,7 +632,7 @@ def is_dead_match(players: list, match_id: str) -> bool:
     return is_dead
 
 
-def extract_and_group_players_data(players: list) -> tuple[list, list]:
+def extract_and_group_players_data(players: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
     """
     Извлекает данные игроков и группирует их по командам.
 
@@ -623,10 +640,10 @@ def extract_and_group_players_data(players: list) -> tuple[list, list]:
     необходимые поля и группируя по командам (Radiant/Dire).
 
     Args:
-        players (list): Список игроков из Steam API
+        players (List[Dict]): Список игроков из Steam API
 
     Returns:
-        tuple[list, list]: Кортеж (игроки_radiant, игроки_dire)
+        Tuple[List[Dict], List[Dict]]: Кортеж (игроки_radiant, игроки_dire)
             Каждый список содержит словари с обработанными данными игроков
     """
     radiant_players = []
@@ -683,7 +700,7 @@ def extract_and_group_players_data(players: list) -> tuple[list, list]:
     return radiant_players, dire_players
 
 
-def create_database_match_record(match: dict) -> dict:
+def create_database_match_record(match: Dict) -> Dict:
     """
     Создаёт итоговый словарь с данными матча для сохранения в БД.
 
@@ -691,12 +708,11 @@ def create_database_match_record(match: dict) -> dict:
     записи в базу данных, включая все необходимые поля.
 
     Args:
-        match (dict): Обработанные данные матча с назначенными ролями
+        match (Dict): Обработанные данные матча с назначенными ролями
 
     Returns:
-        dict: Словарь с данными матча для базы данных, включающий:
-            - Основную информацию о матче
-            - Обработанные данные игроков обеих команд
+        Dict: Словарь с данными матча для базы данных, включающий
+            основную информацию о матче и обработанные данные игроков обеих команд
     """
     return {
         # Основная информация о матче
@@ -724,7 +740,7 @@ def create_database_match_record(match: dict) -> dict:
     }
 
 
-def assign_player_roles(team_players: list) -> list:
+def assign_player_roles(team_players: List[Dict]) -> List[Dict]:
     """
     Назначает роли игрокам команды на основе их игровых характеристик.
 
@@ -734,10 +750,10 @@ def assign_player_roles(team_players: list) -> list:
     - Нормализацию относительно максимумов команды
 
     Args:
-        team_players (list): Список игроков команды (должно быть 5 игроков)
+        team_players (List[Dict]): Список игроков команды (должно быть 5 игроков)
 
     Returns:
-        list: Список игроков с назначенными ролями ('core' или 'support')
+        List[Dict]: Список игроков с назначенными ролями ('core' или 'support')
 
     Raises:
         ValueError: Если количество игроков не равно 5 или роли назначены некорректно
@@ -746,11 +762,11 @@ def assign_player_roles(team_players: list) -> list:
         Алгоритм назначает первых 2 игроков с высшим support_score как саппортов,
         остальных 3 - как коров
     """
-    if len(team_players) != NUMBER_OF_PLAYERS_PER_TEAM:
+    if len(team_players) != TEAM_SIZE:
         raise ValueError("Команда должна состоять из 5 игроков.")
 
     # Вычисляем максимумы один раз для всей команды (для нормализации)
-    # ИСПРАВЛЕНИЕ: используем max(..., 1) вместо default=1 для предотвращения деления на ноль
+    # Используем max(..., 1) для предотвращения деления на ноль
     raw_max_net_worth = max(player["net_worth"] for player in team_players)
     raw_max_last_hits = max(player["last_hits"] for player in team_players)
     raw_max_gpm = max(player["gold_per_min"] for player in team_players)
@@ -786,28 +802,24 @@ def assign_player_roles(team_players: list) -> list:
     return team_players
 
 
-def calculate_player_support_score(player: dict, team_stats: dict) -> float:
+def calculate_player_support_score(player: Dict, team_stats: Dict) -> float:
     """
     Вычисляет support_score для игрока на основе его предметов и игровых показателей.
 
     Support_score представляет собой взвешенную сумму факторов, указывающих
-    на то, что игрок играет роль поддержки:
-
-    Факторы (чем выше, тем больше похож на саппорта):
-    - Количество поддерживающих предметов
-    - Низкие экономические показатели (инвертированные и нормализованные)
-    - Бонус для героев из списка потенциальных сапортов (HERO_SUPPORT_SCORE_EXCEPTIONS)
+    на то, что игрок играет роль поддержки. Чем выше support_score, тем больше
+    игрок похож на саппорта.
 
     Args:
-        player (dict): Словарь с данными игрока
-        team_stats (dict): Словарь с максимальными значениями команды
+        player (Dict): Словарь с данными игрока
+        team_stats (Dict): Словарь с максимальными значениями команды
 
     Returns:
         float: Численный support_score (чем выше, тем больше похож на саппорта)
 
     Note:
         Учитываются исключения саппорт-предметов для конкретных героев из HERO_ITEM_EXCEPTIONS
-        и дополнительный бонус для героев из HERO_SUPPORT_SCORE_EXCEPTIONS.
+        и дополнительный бонус для героев из HERO_SUPPORT_SCORE_EXCEPTIONS
     """
     hero_id = player.get("hero_id")
     hero_variant = player.get("hero_variant", 0)
@@ -830,7 +842,6 @@ def calculate_player_support_score(player: dict, team_stats: dict) -> float:
                 support_items_count += 1
 
     # Нормализованные метрики (0-1, где 1 = максимум команды)
-    # ДОПОЛНИТЕЛЬНАЯ ЗАЩИТА: проверяем на ноль перед делением (не должно происходить после исправления)
     normalized_net_worth = player["net_worth"] / max(team_stats['max_net_worth'], 1)
     normalized_last_hits = player["last_hits"] / max(team_stats['max_last_hits'], 1)
     normalized_gpm = player["gold_per_min"] / max(team_stats['max_gpm'], 1)
@@ -854,16 +865,16 @@ def calculate_player_support_score(player: dict, team_stats: dict) -> float:
     return support_score
 
 
-def log_team_role_assignment(team_players: list):
+def log_team_role_assignment(team_players: List[Dict]) -> None:
     """
     Выводит распределение ролей в команде для отладки.
 
     Выводит детальную информацию о каждом игроке команды,
     включая ID, героя, роль, support_score и ключевые метрики,
-    а также информацию об использовании бонуса для потенциальных сапортов HERO_SUPPORT_SCORE_EXCEPTIONS.
+    а также информацию об использовании бонуса для потенциальных сапортов.
 
     Args:
-        team_players (list): Список игроков команды с назначенными ролями
+        team_players (List[Dict]): Список игроков команды с назначенными ролями
     """
     for player in team_players:
         hero_name = get_hero_name_by_id(player['hero_id'])
@@ -887,11 +898,10 @@ def log_team_role_assignment(team_players: list):
             f"{Colors.BRIGHT_WHITE}Net: {player['net_worth']}{Colors.RESET} | {Colors.BRIGHT_WHITE}LH: {player['last_hits']}{Colors.RESET} | {Colors.BRIGHT_WHITE}GPM: {player['gold_per_min']}{Colors.RESET} | {Colors.BRIGHT_WHITE}XPM: {player['xp_per_min']}{Colors.RESET}")
 
 
-def detect_ruiner_player(player: dict, match_duration_minutes: float, match_id: int,
+def detect_ruiner_player(player: Dict, match_duration_minutes: float, match_id: int,
                          team_score: int, enemy_team_score: int) -> bool:
     """
     Определяет, является ли игрок руинером на основе комплексного анализа.
-    Имеет механизм исключенения определённых факторов для героев через HERO_RUINER_EXCEPTIONS.
 
     Алгоритм детекции руинеров основан на комбинации факторов:
     1. Team Death Ratio - доля смертей игрока от общих смертей вражеской команды
@@ -901,7 +911,7 @@ def detect_ruiner_player(player: dict, match_duration_minutes: float, match_id: 
     5. Аномалии в предметах (пустые слоты, дубликаты)
 
     Args:
-        player (dict): Словарь с данными игрока
+        player (Dict): Словарь с данными игрока
         match_duration_minutes (float): Длительность матча в минутах
         match_id (int): ID матча для логирования
         team_score (int): Счет команды игрока
@@ -913,6 +923,7 @@ def detect_ruiner_player(player: dict, match_duration_minutes: float, match_id: 
     Note:
         Итоговый ruiner_index вычисляется как взвешенная сумма всех факторов.
         Порог детекции определяется константой RUINER_DETECTION_THRESHOLD.
+        Имеет механизм исключенения определённых факторов через HERO_RUINER_EXCEPTIONS.
     """
     # Извлекаем основные характеристики
     kills = player.get("kills", 0)
@@ -935,7 +946,7 @@ def detect_ruiner_player(player: dict, match_duration_minutes: float, match_id: 
     if hero_id in HERO_RUINER_EXCEPTIONS:
         excluded_components.update(HERO_RUINER_EXCEPTIONS[hero_id])
 
-    # Определяем параметры для роли (независимо от исключений, для логирования)
+    # Определяем параметры для роли
     if role == "core":
         expected_kda = CORE_EXPECTED_KDA
         kda_tolerance = CORE_KDA_TOLERANCE
@@ -945,7 +956,7 @@ def detect_ruiner_player(player: dict, match_duration_minutes: float, match_id: 
         kda_tolerance = SUPPORT_KDA_TOLERANCE
         base_gpm, gpm_growth_rate, max_gpm = SUPPORT_BASE_GPM, SUPPORT_GPM_GROWTH_RATE, SUPPORT_MAX_GPM
 
-    # Вычисляем expected_gpm для логирования (независимо от исключений)
+    # Вычисляем expected_gpm
     expected_gpm = min(base_gpm + gpm_growth_rate * max(0.0, match_duration_minutes - GPM_CALCULATION_START_MINUTE),
                        max_gpm)
 
@@ -985,7 +996,6 @@ def detect_ruiner_player(player: dict, match_duration_minutes: float, match_id: 
 
     # === КОМПОНЕНТ 4: Contribution Score ===
     if 'contribution_score' not in excluded_components:
-        # Доля участия в убийствах команды
         contribution_score = (kills + assists) / max(team_score, 1)
     else:
         contribution_score = 1.0  # Исключаем компонент (устанавливаем в максимальное "хорошее" значение)
@@ -1015,7 +1025,7 @@ def detect_ruiner_player(player: dict, match_duration_minutes: float, match_id: 
         # Слишком много пустых слотов
         ruiner_index = 1.0
     elif len(items) >= RUINER_SAME_ITEMS_LIMIT:
-        # Проверяем на слишком много одинаковых предметов (обычно так поступают боты в подставных матчах)
+        # Проверяем на слишком много одинаковых предметов
         item_counts = Counter(items)
         for item_id, count in item_counts.items():
             if count >= RUINER_SAME_ITEMS_LIMIT:
@@ -1031,11 +1041,11 @@ def detect_ruiner_player(player: dict, match_duration_minutes: float, match_id: 
     return ruiner_index > RUINER_DETECTION_THRESHOLD
 
 
-def log_ruiner_detection_details(match_id: int, player: dict, ruiner_index: float,
+def log_ruiner_detection_details(match_id: int, player: Dict, ruiner_index: float,
                                  match_duration: float, role: str, team_death_ratio: float,
                                  kda_score: float, income_score: float, contribution_score: float,
                                  expected_gpm: float, team_score: int, actual_kda: float, expected_kda: float,
-                                 excluded_components: set = None):
+                                 excluded_components: Optional[Set[str]] = None) -> None:
     """
     Логирует детальную статистику потенциального руинера для отладки.
 
@@ -1044,7 +1054,7 @@ def log_ruiner_detection_details(match_id: int, player: dict, ruiner_index: floa
 
     Args:
         match_id (int): ID матча
-        player (dict): Данные игрока
+        player (Dict): Данные игрока
         ruiner_index (float): Вычисленный индекс руинера
         match_duration (float): Длительность матча в минутах
         role (str): Роль игрока ('core' или 'support')
@@ -1056,7 +1066,7 @@ def log_ruiner_detection_details(match_id: int, player: dict, ruiner_index: floa
         team_score (int): Счет команды
         actual_kda (float): Фактический KDA игрока
         expected_kda (float): Ожидаемый KDA для роли
-        excluded_components (set, optional): Исключенные компоненты для данного героя
+        excluded_components (Set[str], optional): Исключённые компоненты для данного героя
     """
     status = "РУИНЕР" if ruiner_index > RUINER_DETECTION_THRESHOLD else "ПОДОЗРЕНИЕ"
     status_color = Colors.BRIGHT_RED if ruiner_index > RUINER_DETECTION_THRESHOLD else Colors.BRIGHT_YELLOW
@@ -1087,32 +1097,32 @@ def log_ruiner_detection_details(match_id: int, player: dict, ruiner_index: floa
             f"TDR: {Colors.BRIGHT_YELLOW}{TEAM_DEATH_RATIO_WEIGHT * team_death_ratio:.3f}{Colors.RESET} "
             f"({Colors.BRIGHT_YELLOW}{team_death_ratio * 100:.1f}%{Colors.RESET})")
     else:
-        components_display.append(f"TDR: {Colors.BRIGHT_YELLOW}ИСКЛЮЧЕН{Colors.RESET}")
+        components_display.append(f"TDR: {Colors.BRIGHT_YELLOW}ИСКЛЮЧЁН{Colors.RESET}")
 
     if 'kda_score' not in (excluded_components or set()):
         components_display.append(f"KDA: {Colors.BRIGHT_YELLOW}{KDA_SCORE_WEIGHT * kda_score:.3f}{Colors.RESET} "
                                   f"({Colors.BRIGHT_YELLOW}{kda_score * 100:.1f}%{Colors.RESET})")
     else:
-        components_display.append(f"KDA: {Colors.BRIGHT_YELLOW}ИСКЛЮЧЕН{Colors.RESET}")
+        components_display.append(f"KDA: {Colors.BRIGHT_YELLOW}ИСКЛЮЧЁН{Colors.RESET}")
 
     if 'income_score' not in (excluded_components or set()):
         components_display.append(
             f"IS: {Colors.BRIGHT_YELLOW}{INCOME_SCORE_WEIGHT * (1 - income_score):.3f}{Colors.RESET} "
             f"({Colors.BRIGHT_YELLOW}{(1 - income_score) * 100:.1f}%{Colors.RESET})")
     else:
-        components_display.append(f"IS: {Colors.BRIGHT_YELLOW}ИСКЛЮЧЕН{Colors.RESET}")
+        components_display.append(f"IS: {Colors.BRIGHT_YELLOW}ИСКЛЮЧЁН{Colors.RESET}")
 
     if 'contribution_score' not in (excluded_components or set()):
         components_display.append(
             f"CS: {Colors.BRIGHT_YELLOW}{CONTRIBUTION_SCORE_WEIGHT * (1 - contribution_score):.3f}{Colors.RESET} "
             f"({Colors.BRIGHT_YELLOW}{(1 - contribution_score) * 100:.1f}%{Colors.RESET})")
     else:
-        components_display.append(f"CS: {Colors.BRIGHT_YELLOW}ИСКЛЮЧЕН{Colors.RESET}")
+        components_display.append(f"CS: {Colors.BRIGHT_YELLOW}ИСКЛЮЧЁН{Colors.RESET}")
 
     print(f"{Colors.BRIGHT_WHITE}Метрики:{Colors.RESET} " + " | ".join(components_display))
 
 
-def process_match_batch(steam_matches: list) -> tuple[list, dict]:
+def process_match_batch(steam_matches: List[Dict]) -> Tuple[List[Dict], Dict]:
     """
     Основная функция для обработки одного запроса (батча) матчей из Steam API.
 
@@ -1123,12 +1133,12 @@ def process_match_batch(steam_matches: list) -> tuple[list, dict]:
     4. Сбор статистики обработки
 
     Args:
-        steam_matches (list): Список матчей от Steam API
+        steam_matches (List[Dict]): Список матчей от Steam API
 
     Returns:
-        tuple[list, dict]: Кортеж из обработанных матчей и объединенной статистики
-            - list: Готовые для сохранения в БД записи матчей
-            - dict: Объединенная статистика всех этапов обработки
+        Tuple[List[Dict], Dict]: Кортеж из обработанных матчей и объединенной статистики
+            - List[Dict]: Готовые для сохранения в БД записи матчей
+            - Dict: Объединенная статистика всех этапов обработки
     """
     # Первичная фильтрация
     primary_filtered_matches, primary_stats = primary_match_filters(steam_matches)
@@ -1172,7 +1182,7 @@ def process_match_batch(steam_matches: list) -> tuple[list, dict]:
     return processed_matches, combined_statistics
 
 
-def print_batch_processing_statistics(stats: dict):
+def print_batch_processing_statistics(stats: Dict) -> None:
     """
     Выводит детальную статистику обработки матчей (только если включено).
 
@@ -1180,9 +1190,9 @@ def print_batch_processing_statistics(stats: dict):
     общую успешность обработки и причины отклонения матчей.
 
     Args:
-        stats (dict): Словарь со статистикой обработки, включающий:
-            - Общие счетчики (input, filtered, processed)
-            - Детальные исключения по категориям (если включены)
+        stats (Dict): Словарь со статистикой обработки, включающий
+            общие счетчики (input, filtered, processed) и
+            детальные исключения по категориям (если включены)
     """
     if not ENABLE_DETAILED_STATISTICS:
         return
@@ -1245,7 +1255,7 @@ def print_batch_processing_statistics(stats: dict):
         print_status_message("Все матчи прошли фильтрацию успешно", "success")
 
 
-def calculate_minimum_expected_matches(requested_count):
+def calculate_minimum_expected_matches(requested_count: int) -> int:
     """
     Вычисляет минимальное ожидаемое количество матчей для определения "заниженного" ответа.
 
@@ -1263,7 +1273,7 @@ def calculate_minimum_expected_matches(requested_count):
         return max(1, int(requested_count * 0.7))
 
 
-def save_matches_to_database(session, batch_matches: list, total_saved_matches: int,
+def save_matches_to_database(session: Session, batch_matches: List[Dict], total_saved_matches: int,
                              chunk_start_time: float, program_start_time: float) -> int:
     """
     Сохраняет матчи в базу данных с выводом статистики производительности.
@@ -1273,8 +1283,8 @@ def save_matches_to_database(session, batch_matches: list, total_saved_matches: 
     статистику производительности операции.
 
     Args:
-        session: Сессия SQLAlchemy для работы с БД
-        batch_matches (list): Список матчей для сохранения
+        session (Session): Сессия SQLAlchemy для работы с БД
+        batch_matches (List[Dict]): Список матчей для сохранения
         total_saved_matches (int): Общее количество уже сохраненных матчей
         chunk_start_time (float): Время начала накопления текущего чанка
         program_start_time (float): Время запуска программы
@@ -1356,7 +1366,7 @@ def save_matches_to_database(session, batch_matches: list, total_saved_matches: 
                 kills=kills,
                 deaths=deaths,
                 assists=assists,
-                kda=(kills + assists) / max(1, deaths),  # Вычисляем KDA
+                kda=(kills + assists) / max(1, deaths),
 
                 # Экономическая статистика
                 last_hits=player_data.get("last_hits", 0),
@@ -1422,7 +1432,7 @@ def save_matches_to_database(session, batch_matches: list, total_saved_matches: 
 
 def print_final_collection_statistics(total_saved_matches: int, total_processed_matches: int,
                                       steam_api_calls: int, program_start_time: float,
-                                      database_state: dict, accumulated_statistics: dict = None):
+                                      database_state: Dict, accumulated_statistics: Optional[Dict] = None) -> None:
     """
     Выводит итоговую статистику работы программы.
 
@@ -1435,11 +1445,13 @@ def print_final_collection_statistics(total_saved_matches: int, total_processed_
         total_processed_matches (int): Количество обработанных матчей
         steam_api_calls (int): Количество вызовов Steam API
         program_start_time (float): Время запуска программы
-        database_state (dict): Состояние базы данных
-        accumulated_statistics (dict, optional): Накопленная статистика (если включена)
+        database_state (Dict): Состояние базы данных
+        accumulated_statistics (Dict, optional): Накопленная статистика (если включена)
     """
+
+    # Не выводим статистику если сбор не производился
     if database_state['scenario'] == 'complete':
-        return  # Не выводим статистику если сбор не производился
+        return
 
     total_execution_time = time.time() - program_start_time
     overall_processing_speed = (total_saved_matches / total_execution_time * 60) if total_execution_time > 0 else 0
@@ -1502,7 +1514,7 @@ def print_final_collection_statistics(total_saved_matches: int, total_processed_
                 print_info_line(reason, f"{count:,}", "⚠️", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
 
 
-def main():
+def main() -> None:
     """
     Главная функция программы для сбора и анализа данных матчей Dota 2.
 
@@ -1593,7 +1605,7 @@ def main():
                 print_status_message("Steam API | Матчи не найдены, завершение работы.", "warning")
                 break
 
-            # НОВАЯ ЛОГИКА: Проверка на заниженное количество матчей
+            # Проверка на заниженное количество матчей
             received_matches_count = len(raw_steam_matches)
             minimum_expected_matches = calculate_minimum_expected_matches(MATCHES_PER_API_REQUEST)
 

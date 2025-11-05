@@ -1,15 +1,27 @@
 """
 Модуль загрузки данных о героях Dota 2 из OpenDota API.
 
-Получает актуальную информацию о всех героях игры и сохраняет
-в базу данных для использования в качестве справочника.
+Модуль обеспечивает полный цикл работы со справочником героев:
+получение актуальных данных из OpenDota API, валидацию, сохранение
+в базу данных и отображение статистики.
+
+Основные компоненты:
+- Получение данных через OpenDota API (/api/heroes endpoint)
+- Валидация обязательных полей (id, name, атрибуты, тип атаки)
+- Сохранение в БД с полной заменой (clear → insert)
+- Статистика по атрибутам, типам атаки и ролям
 """
 
+# Стандартные библиотеки
+from typing import List, Dict, Optional
+
+# Сторонние библиотеки
 import requests
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import SQLAlchemyError
 
+# Локальные импорты
 from data_bases.heroes.models import Hero
 from config import HEROES_DATABASE_URL, OPENDOTA_HEROES_API
 from utils.console import (
@@ -17,36 +29,34 @@ from utils.console import (
     print_subsection_header,
     print_status_message,
     print_info_line,
-    print_progress_bar,
     Colors
 )
+
+# === КОНСТАНТЫ ОТОБРАЖЕНИЯ ===
+HEROES_DISPLAY_COUNT = 0  # 0 - показывать всех героев, N > 0 - показывать N героев
 
 # Создаем подключение к БД героев
 engine = create_engine(HEROES_DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
-def get_heroes_data_from_opendota_api():
+def get_heroes_data_from_opendota_api() -> Optional[List[Dict]]:
     """
-    Получает данные о героях Dota 2 из OpenDota API.
-
-    Выполняет HTTP запрос к OpenDota API для получения информации
-    о всех героях игры с их характеристиками.
+    Получает данные о всех героях Dota 2 из OpenDota API.
 
     Returns:
-        list: Список словарей с данными героев или None при ошибке
+        Optional[List[Dict]]: Список героев с полями [id, name, localized_name,
+            primary_attr, attack_type, roles] или None при ошибке запроса
 
     Note:
-        API возвращает полную информацию включая ID, имена, атрибуты и роли
+        Timeout установлен 30 секунд. При сетевых ошибках возвращает None
+        с выводом соответствующего статуса в консоль
     """
     print_status_message("Запрос к OpenDota API...", "info", "🌐")
 
     try:
-        # Выполняем HTTP запрос к API
         response = requests.get(OPENDOTA_HEROES_API, timeout=30)
         response.raise_for_status()
-
-        # Парсим JSON ответ
         data = response.json()
 
         print_info_line("Получено героев", f"{len(data)}", "⚔️")
@@ -71,16 +81,15 @@ def get_heroes_data_from_opendota_api():
         return None
 
 
-def clear_heroes_table(session):
+def clear_heroes_table(session: Session) -> None:
     """
     Очищает таблицу героев перед загрузкой новых данных.
-    Удаляет все существующие записи для обеспечения актуальности данных.
 
     Args:
-        session: Активная сессия SQLAlchemy
+        session (Session): Активная сессия SQLAlchemy
 
     Raises:
-        SQLAlchemyError: При ошибках работы с БД
+        SQLAlchemyError: При ошибках работы с БД (rollback выполняется автоматически)
     """
     try:
         deleted_count = session.query(Hero).count()
@@ -95,28 +104,34 @@ def clear_heroes_table(session):
         raise
 
 
-def validate_hero_data(hero_data):
+def validate_hero_data(hero_data: Dict) -> bool:
     """
     Проверяет корректность данных героя перед сохранением.
 
+    Валидация включает:
+    - Наличие обязательных полей: id, name, localized_name, primary_attr, attack_type
+    - Валидность primary_attr: ['agi', 'str', 'int', 'all']
+    - Валидность attack_type: ['Melee', 'Ranged']
+
     Args:
-        hero_data (dict): Данные героя из API
+        hero_data (Dict): Данные героя из API
 
     Returns:
         bool: True если данные валидны, False иначе
     """
     required_fields = ['id', 'name', 'localized_name', 'primary_attr', 'attack_type']
 
-    # Проверяем наличие обязательных полей
+    # Проверка наличия обязательных полей
     for field in required_fields:
         if not hero_data.get(field):
             return False
 
-    # Проверяем валидность значений атрибутов
+    # Валидация значений атрибутов: agi/str/int/all
     valid_attrs = ['agi', 'str', 'int', 'all']
     if hero_data.get('primary_attr') not in valid_attrs:
         return False
 
+    # Валидация типа атаки: Melee/Ranged
     valid_attack_types = ['Melee', 'Ranged']
     if hero_data.get('attack_type') not in valid_attack_types:
         return False
@@ -124,16 +139,22 @@ def validate_hero_data(hero_data):
     return True
 
 
-def save_heroes_to_database(heroes_data):
+def save_heroes_to_database(heroes_data: List[Dict]) -> bool:
     """
-    Сохраняет данные о героях в базу данных с валидацией.
-    Выводит подробную статистику процесса сохранения.
+    Сохраняет данные о героях в базу данных с предварительной валидацией.
+
+    Процесс сохранения:
+    1. Очистка таблицы (удаление старых записей)
+    2. Валидация каждого героя
+    3. Обработка ролей (конвертация списка в строку через запятую)
+    4. Batch insert всех валидных героев
+    5. Вывод статистики (сохранено/пропущено)
 
     Args:
-        heroes_data (list): Список словарей с данными героев из API
+        heroes_data (List[Dict]): Список словарей с данными героев из API
 
     Returns:
-        bool: True если сохранение прошло успешно, False при ошибке
+        bool: True если сохранение успешно, False при ошибках БД или пустых данных
     """
     if not heroes_data:
         print_status_message("Нет данных для сохранения", "warning", "⚠️")
@@ -144,26 +165,22 @@ def save_heroes_to_database(heroes_data):
     try:
         print_subsection_header("Сохранение в базу данных", "💾", Colors.BRIGHT_BLUE)
 
-        # Очищаем таблицу перед загрузкой новых данных
         clear_heroes_table(session)
 
         saved_count = 0
         skipped_count = 0
 
-        # Обрабатываем каждого героя
         for hero_data in heroes_data:
-            # Валидируем данные героя
             if not validate_hero_data(hero_data):
                 print_status_message(f"Пропущен герой с некорректными данными: {hero_data.get('name', 'Unknown')}",
                                      "warning", "⚠️")
                 skipped_count += 1
                 continue
 
-            # Обрабатываем роли - сохраняем все роли через запятую
+            # Обработка ролей - конвертация списка в строку через запятую
             roles = hero_data.get('roles', [])
             roles_str = ','.join(roles) if roles else 'Support'
 
-            # Создаем объект Hero
             hero = Hero(
                 id=hero_data.get('id'),
                 name=hero_data.get('name'),
@@ -176,10 +193,8 @@ def save_heroes_to_database(heroes_data):
             session.add(hero)
             saved_count += 1
 
-        # Коммитим все изменения
         session.commit()
 
-        # Выводим статистику сохранения
         print_info_line("Сохранено героев", f"{saved_count}", "✅")
         if skipped_count > 0:
             print_info_line("Пропущено записей", f"{skipped_count}", "⚠️")
@@ -199,54 +214,75 @@ def save_heroes_to_database(heroes_data):
         session.close()
 
 
-def display_database_sample():
+def display_database_sample() -> None:
     """
-    Выводит примеры данных из базы данных для демонстрации результата.
+    Выводит героев из БД с детальной статистикой.
 
-    Показывает несколько случайных записей героев с их характеристиками
-    для проверки корректности сохраненных данных.
+    Режимы отображения (контролируется через HEROES_DISPLAY_COUNT):
+    - 0 или отрицательное: показывает всех героев (отсортированных по ID)
+    - N > 0: показывает N героев (разнообразная выборка по атрибутам)
+
+    Выводимая информация:
+    - Детали героев: localized_name, ID, системное имя, атрибут, тип атаки, роли
+    - Статистика по основным атрибутам (AGI/STR/INT/Universal)
+    - Статистика по типам атаки (Melee/Ranged)
+    - Статистика по ролям (отсортировано по популярности)
     """
-    print_subsection_header("Примеры данных в БД", "🎭", Colors.BRIGHT_MAGENTA)
-
     session = SessionLocal()
 
     try:
-        # Получаем общую статистику
         total_heroes = session.query(Hero).count()
 
         if total_heroes == 0:
             print_status_message("База данных пуста", "warning", "⚠️")
             return
 
-        # Получаем несколько разнообразных примеров
-        sample_size = min(8, total_heroes)
+        # Определение режима отображения на основе HEROES_DISPLAY_COUNT
+        show_all_heroes = (HEROES_DISPLAY_COUNT <= 0) or (HEROES_DISPLAY_COUNT >= total_heroes)
 
-        # Получаем героев разных типов для демонстрации разнообразия
-        sample_heroes = []
+        if show_all_heroes:
+            display_count = total_heroes
+            header_text = "Все герои в БД"
+            header_icon = "👑"
+            status_text = f"Все герои ({display_count} записей):"
+        else:
+            display_count = HEROES_DISPLAY_COUNT
+            header_text = "Примеры данных в БД"
+            header_icon = "🎭"
+            status_text = f"Примеры героев ({display_count} из {total_heroes} записей):"
 
-        # Пытаемся получить по одному герою каждого основного атрибута
-        for attr in ['agi', 'str', 'int']:
-            hero = session.query(Hero).filter(Hero.primary_attr == attr).first()
-            if hero:
-                sample_heroes.append(hero)
+        print_subsection_header(header_text, header_icon, Colors.BRIGHT_MAGENTA)
 
-        # Добавляем универсального героя если есть
-        universal_hero = session.query(Hero).filter(Hero.primary_attr == 'all').first()
-        if universal_hero:
-            sample_heroes.append(universal_hero)
+        # Получение героев для отображения
+        if show_all_heroes:
+            heroes_to_show = session.query(Hero).order_by(Hero.id).all()
+        else:
+            # Формирование разнообразной выборки для демонстрации
+            heroes_to_show = []
 
-        # Дополняем до нужного количества случайными героями
-        remaining_count = sample_size - len(sample_heroes)
-        if remaining_count > 0:
-            existing_ids = [h.id for h in sample_heroes]
-            additional_heroes = session.query(Hero).filter(~Hero.id.in_(existing_ids)).limit(remaining_count).all()
-            sample_heroes.extend(additional_heroes)
+            # Добавляем по одному герою каждого основного атрибута
+            for attr in ['agi', 'str', 'int']:
+                hero = session.query(Hero).filter(Hero.primary_attr == attr).first()
+                if hero:
+                    heroes_to_show.append(hero)
 
-        print_status_message(f"Примеры героев ({len(sample_heroes)} записей):", "info", "📋")
+            # Добавляем универсального героя если есть
+            universal_hero = session.query(Hero).filter(Hero.primary_attr == 'all').first()
+            if universal_hero:
+                heroes_to_show.append(universal_hero)
 
-        # Выводим детальную информацию о каждом герое
-        for i, hero in enumerate(sample_heroes, 1):
-            # Форматируем атрибут в читаемый вид
+            # Дополняем до нужного количества
+            remaining_count = display_count - len(heroes_to_show)
+            if remaining_count > 0:
+                existing_ids = [h.id for h in heroes_to_show]
+                additional_heroes = session.query(Hero).filter(~Hero.id.in_(existing_ids)).limit(remaining_count).all()
+                heroes_to_show.extend(additional_heroes)
+
+        print_status_message(status_text, "info", "📋")
+
+        # Вывод детальной информации о каждом герое
+        for i, hero in enumerate(heroes_to_show, 1):
+            # Форматирование атрибута в читаемый вид
             attr_display = {
                 'agi': 'Ловкость (AGI)',
                 'str': 'Сила (STR)',
@@ -254,13 +290,11 @@ def display_database_sample():
                 'all': 'Универсальный'
             }.get(hero.primary_attr, hero.primary_attr)
 
-            # Форматируем тип атаки
             attack_display = {
                 'Melee': 'Ближний бой',
                 'Ranged': 'Дальний бой'
             }.get(hero.attack_type, hero.attack_type)
 
-            # Форматируем роли
             roles_list = hero.roles.split(',') if hero.roles else []
             roles_display = ', '.join(roles_list)
 
@@ -274,10 +308,10 @@ def display_database_sample():
             print(
                 f"     {Colors.BRIGHT_WHITE}Роли:{Colors.RESET} {Colors.BRIGHT_PURPLE}{roles_display}{Colors.RESET}")
 
-        # Статистика по атрибутам
         print()
         print_status_message("Статистика по основным атрибутам:", "info", "📊")
 
+        # Сбор статистики по атрибутам
         attr_stats = {}
         for attr in ['agi', 'str', 'int', 'all']:
             count = session.query(Hero).filter(Hero.primary_attr == attr).count()
@@ -288,7 +322,6 @@ def display_database_sample():
             attr_name = {'agi': 'Ловкость', 'str': 'Сила', 'int': 'Интеллект', 'all': 'Универсальный'}[attr]
             print_info_line(attr_name, f"{count} героев", "🎯")
 
-        # Статистика по типам атаки
         print()
         print_status_message("Статистика по типам атаки:", "info", "⚔️")
 
@@ -298,11 +331,10 @@ def display_database_sample():
         print_info_line("Ближний бой", f"{melee_count} героев", "🗡️")
         print_info_line("Дальний бой", f"{ranged_count} героев", "🏹")
 
-        # Статистика по самым популярным ролям
         print()
-        print_status_message("Топ-5 самых популярных ролей:", "info", "🏆")
+        print_status_message("Статистика по ролям:", "info", "🏆")
 
-        # Собираем статистику по ролям
+        # Сбор статистики по ролям из всех героев
         role_counts = {}
         all_heroes = session.query(Hero).all()
         for hero in all_heroes:
@@ -312,9 +344,9 @@ def display_database_sample():
                     role = role.strip()
                     role_counts[role] = role_counts.get(role, 0) + 1
 
-        # Сортируем и выводим топ-5
+        # Сортировка по популярности
         sorted_roles = sorted(role_counts.items(), key=lambda x: x[1], reverse=True)
-        for role, count in sorted_roles[:5]:
+        for role, count in sorted_roles:
             print_info_line(role, f"{count} героев", "🎭")
 
     except SQLAlchemyError as e:
@@ -325,23 +357,25 @@ def display_database_sample():
         session.close()
 
 
-def main():
+def main() -> None:
     """
-    Основная функция для полного цикла загрузки данных о героях.
+    Выполняет полный цикл загрузки данных о героях.
+
+    Последовательность:
+    1. Получение данных из OpenDota API
+    2. Сохранение в БД с валидацией
+    3. Вывод данных и статистики
     """
     print_section_header("ЗАГРУЗКА ДАННЫХ О ГЕРОЯХ DOTA 2", "⚔️", color=Colors.BRIGHT_PURPLE)
 
-    # Получаем данные из API
     heroes_data = get_heroes_data_from_opendota_api()
 
     if heroes_data:
-        print()  # Добавляем отступ
+        print()
 
-        # Сохраняем в базу данных
         if save_heroes_to_database(heroes_data):
-            print()  # Добавляем отступ
+            print()
 
-            # Показываем примеры данных
             display_database_sample()
 
             print()

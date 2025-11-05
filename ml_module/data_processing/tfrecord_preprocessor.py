@@ -35,32 +35,46 @@
 """
 
 import os
-
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 
+# Стандартные библиотеки
 import random
 import sys
 import time
+from typing import Any, Dict, List, Optional, Tuple
+
+# Сторонние библиотеки
 import numpy as np
 import tensorflow as tf
-from typing import List, Tuple, Dict, Any, Optional
-from sqlalchemy import create_engine, select, func, and_
+from sqlalchemy import and_, create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
-from config import DATASET_DATABASE_URL, EXCLUDED_HERO_IDS, ROLE_MAPPING, RADIANT_TEAM, DIRE_TEAM, TEAM_SIZE, \
-    TEST_DATASET_SIZE, CHUNK_SIZE, VALIDATION_SAMPLE_SIZE, TFRECORD_FILE_NAME, DOTA_VERSION
+# Локальные импорты
+from config import (
+    DATASET_DATABASE_URL,
+    DIRE_TEAM,
+    DOTA_VERSION,
+    EXCLUDED_HERO_IDS,
+    RADIANT_TEAM,
+    ROLE_MAPPING,
+    TEAM_SIZE,
+)
 from data_bases.dataset.models import Match, MatchPlayer
-from utils.hero_mapper import HeroMapper
-
-# Импорт утилит для консольного вывода
 from utils.console import (
     Colors,
-    print_section_header,
-    print_subsection_header,
     print_info_line,
     print_progress_bar,
-    print_status_message
+    print_section_header,
+    print_status_message,
+    print_subsection_header,
 )
+from utils.hero_mapper import HeroMapper
+
+# === НАСТРОЙКИ TFRECORD ПРЕПРОЦЕССОРА ===
+TFRECORD_FILE_NAME = "TFRecord_dataset"     # Базовое имя выходных файлов
+CHUNK_SIZE = 100_000                        # Размер чанка для потоковой обработки
+TEST_DATASET_SIZE = 10_000                  # Размер тестовой выборки
+VALIDATION_SAMPLE_SIZE = 10_000             # Количество записей для валидации
 
 
 class TFRecordPreprocessor:
