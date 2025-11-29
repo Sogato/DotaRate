@@ -78,12 +78,9 @@ from sqlalchemy.exc import IntegrityError
 from data_bases.pro_matches.models import ProMatch, ProMatchPlayer
 from data_bases.heroes.models import Hero
 from config import (
-    PRO_DATABASE_URL, HEROES_DATABASE_URL, OPENDOTA_PRO_MATCHES_URL, OPENDOTA_MATCH_DETAILS_URL,
-    BURST_TIME_TIMESTAMP, TEAM_SIZE,
-    MAX_LEVEL_1_RATIO, MAX_ZERO_LASTHITS_RATIO, MIN_TOTAL_LAST_HITS,
-    SUPPORT_ITEM_IDS, HERO_ITEM_EXCEPTIONS, HERO_SUPPORT_SCORE_EXCEPTIONS,
-    SUPPORT_ITEMS_WEIGHT, SUPPORT_SCORE_EXCEPTION_WEIGHT, NET_WORTH_WEIGHT,
-    LAST_HITS_WEIGHT, GPM_WEIGHT, XPM_WEIGHT
+    PRO_DATABASE_URL, HEROES_DATABASE_URL, OPENDOTA_PRO_MATCHES_URL, OPENDOTA_MATCH_DETAILS_URL, BURST_TIME_TIMESTAMP,
+    TEAM_SIZE, RADIANT_INDEX, DIRE_INDEX, PLAYER_SLOT_TEAM_BITMASK, SERIES_TYPES, VALID_LEAVER_STATUSES,
+    SUPPORT_ITEM_IDS, HERO_ITEM_EXCEPTIONS, HERO_SUPPORT_SCORE_EXCEPTIONS
 )
 from utils.console import (
     Colors,
@@ -104,24 +101,39 @@ HeroesSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=heroes
 # === ГЛОБАЛЬНЫЙ КЭШ ===
 HEROES_CACHE = {}  # {hero_id: localized_name}, загружается при старте
 
-# === КОНСТАНТЫ API ===
-API_REQUEST_DELAY = 0                           # Задержка между запросами в секундах
-MAX_RETRIES_FOR_MATCH_DETAILS = 5               # Количество повторных попыток получения деталей матча
-RETRY_DELAY = 10                                # Задержка между повторами (секунды)
-
 # === КОНСТАНТЫ ОТЛАДКИ ===
-ENABLE_DETAILED_STATISTICS = False              # Детальная статистика обработки каждого батча
-ENABLE_ROLE_LOGGING = False                     # Логирование процесса назначения ролей игрокам
+ENABLE_DETAILED_STATISTICS = False          # Детальная статистика обработки каждого батча
+ENABLE_ROLE_LOGGING = False                 # Логирование процесса назначения ролей игрокам
 
-# === КОНСТАНТЫ СЦЕНАРИЕВ ===
-BURST_TIME_TOLERANCE = 1 * 24 * 60 * 60         # Допустимое отклонение от BURST_TIME (1 день в секундах)
-TARGET_MATCHES_COUNT = 100000                   # Целевое количество матчей для сбора
+# === КОНСТАНТЫ КОНФИГУРАЦИИ ===
+TARGET_MATCHES_COUNT = 10_000              # Целевое количество матчей для сбора
+BURST_TIME_TOLERANCE = 1 * 24 * 60 * 60     # Допустимое отклонение от BURST_TIME (1 день в секундах)
 
-# Идентификаторы сценариев сбора
-SCENARIO_INITIAL = 'initial_collection'         # Изначальный сбор в пустую БД
-SCENARIO_UPDATE = 'update_collection'           # Обновление: добавление новых матчей
-SCENARIO_BACKFILL = 'backfill_collection'       # Заполнение пробелов до BURST_TIME
-SCENARIO_COMPLETE = 'no_collection_needed'      # Сбор не требуется
+# === КОНСТАНТЫ API ===
+API_REQUEST_DELAY = 0                       # Задержка между запросами в секундах
+MAX_RETRIES = 5                             # Количество повторных попыток получения данных
+RETRY_DELAY = 30                            # Задержка между повторами (секунды)
+
+# === ИНДИФИКАТОРЫ СЦЕНАРИЕВ СБОРА ===
+SCENARIO_INITIAL = 'initial_collection'     # Изначальный сбор в пустую БД
+SCENARIO_UPDATE = 'update_collection'       # Обновление: добавление новых матчей
+SCENARIO_BACKFILL = 'backfill_collection'   # Заполнение пробелов до BURST_TIME
+SCENARIO_COMPLETE = 'no_collection_needed'  # Сбор не требуется
+
+# === ПАРАМЕТРЫ ОПРЕДЕЛЕНИЯ РОЛЕЙ ===
+# Веса компонентов для расчета support_score при назначении роли игроку
+SUPPORT_ITEMS_WEIGHT = 5                    # Вес количества саппорт предметов
+SUPPORT_SCORE_EXCEPTION_WEIGHT = 10         # Бонус для героев из HERO_SUPPORT_SCORE_EXCEPTIONS
+NET_WORTH_WEIGHT = 10                       # Вес net worth (инвертированный)
+LAST_HITS_WEIGHT = 5                        # Вес last hits (инвертированный)
+GPM_WEIGHT = 5                              # Вес GPM (инвертированный)
+XPM_WEIGHT = 5                              # Вес XPM (инвертированный)
+
+# === ПАРАМЕТРЫ ФИЛЬТРАЦИИ "МЁРТВЫХ" МАТЧЕЙ ===
+# Пороговые значения для исключения матчей с ботами/афк игроками
+MAX_LEVEL_1_RATIO = 0.1                     # Максимальная доля игроков на 1 уровне (10%)
+MAX_ZERO_LASTHITS_RATIO = 0.1               # Максимальная доля игроков с 0 last_hits (10%)
+MIN_TOTAL_LAST_HITS = 30                    # Минимальное суммарное количество last_hits на матч
 
 
 def initialize_heroes_cache() -> bool:
@@ -650,14 +662,14 @@ def apply_primary_filters(pro_matches: List[Dict]) -> Tuple[List[Dict], Optional
         filter_stats = None
 
     for match in pro_matches:
-        # Фильтр по времени начала (должен быть после временной границы)
+        # Фильтр по времени начала
         if match.get("start_time", 0) <= BURST_TIME_TIMESTAMP:
             if ENABLE_DETAILED_STATISTICS:
                 filter_stats['excluded_burst_time'] += 1
             continue
 
-        # Фильтр по типу серии (1=Best of 1, 2=Best of 3, 3=Best of 5)
-        if match.get("series_type", 0) not in [1, 2, 3]:
+        # Фильтр по типу серии
+        if match.get("series_type", 0) not in SERIES_TYPES:
             if ENABLE_DETAILED_STATISTICS:
                 filter_stats['excluded_series_type'] += 1
             continue
@@ -685,7 +697,7 @@ def apply_primary_filters(pro_matches: List[Dict]) -> Tuple[List[Dict], Optional
     return filtered_matches, filter_stats
 
 
-def fetch_pro_matches_list(less_than_match_id: Optional[int] = None) -> List[Dict]:
+def fetch_pro_matches_list(less_than_match_id: Optional[int] = None) -> Optional[List[Dict]]:
     """
     Получает список профессиональных матчей из OpenDota API.
 
@@ -698,16 +710,16 @@ def fetch_pro_matches_list(less_than_match_id: Optional[int] = None) -> List[Dic
             Если None, получает самые новые матчи.
 
     Returns:
-        List[Dict]: Список словарей с данными профессиональных матчей.
-            Каждый словарь содержит базовую информацию о матче:
-            match_id, start_time, duration, radiant_win, team names и т.д.
+        Optional[List[Dict]]: Список словарей с данными профессиональных матчей.
+            Возвращает None если не удалось получить данные после всех попыток.
             Возвращает пустой список если матчей больше нет.
 
     Note:
-        Функция использует бесконечный цикл с обработкой исключений для гарантированного
-        получения данных. При ошибках автоматически повторяет запрос через 10 секунд.
+        Функция делает до MAX_RETRIES попыток с задержкой RETRY_DELAY между ними.
     """
-    while True:
+    retry_count = 0
+
+    while retry_count < MAX_RETRIES:
         try:
             params = {}
             if less_than_match_id:
@@ -719,11 +731,40 @@ def fetch_pro_matches_list(less_than_match_id: Optional[int] = None) -> List[Dic
             return response.json()
 
         except requests.exceptions.Timeout:
-            print_status_message("OpenDota API | Таймаут запроса, повторный запрос через 10 секунд...", "warning", "⏱️")
-            time.sleep(10)
+            retry_count += 1
+            if retry_count < MAX_RETRIES:
+                print_status_message(
+                    f"OpenDota API | Таймаут запроса, попытка {retry_count}/{MAX_RETRIES}, "
+                    f"повтор через {RETRY_DELAY} сек...",
+                    "warning",
+                    "⏱️"
+                )
+                time.sleep(RETRY_DELAY)
+            else:
+                print_status_message(
+                    f"OpenDota API | Таймаут после {MAX_RETRIES} попыток",
+                    "error",
+                    "❌"
+                )
+
         except requests.exceptions.RequestException as e:
-            print_status_message(f"OpenDota API | Ошибка запроса: {e}, повтор через 10 секунд...", "error", "❌")
-            time.sleep(10)
+            retry_count += 1
+            if retry_count < MAX_RETRIES:
+                print_status_message(
+                    f"OpenDota API | Ошибка запроса: {e}, попытка {retry_count}/{MAX_RETRIES}, "
+                    f"повтор через {RETRY_DELAY} сек...",
+                    "error",
+                    "❌"
+                )
+                time.sleep(RETRY_DELAY)
+            else:
+                print_status_message(
+                    f"OpenDota API | Не удалось получить данные после {MAX_RETRIES} попыток: {e}",
+                    "error",
+                    "❌"
+                )
+
+    return None
 
 
 def collect_pro_matches(target_count: int, db_state: Dict,
@@ -1079,9 +1120,9 @@ def extract_and_group_players_data(players: List[Dict]) -> Tuple[List[Dict], Lis
     Обрабатывает сырые данные от OpenDota API, извлекая только
     необходимые поля и распределяя игроков по командам (Radiant/Dire).
 
-    В OpenDota распределение команд определяется полем player_slot:
-    - player_slot < 128 = Radiant
-    - player_slot >= 128 = Dire
+    Распределение команд определяется полем player_slot:
+    - player_slot от 0 до 127 = Radiant
+    - player_slot от 128 до 255 = Dire
 
     Args:
         players (List[Dict]): Список игроков из OpenDota match details API
@@ -1141,10 +1182,13 @@ def extract_and_group_players_data(players: List[Dict]) -> Tuple[List[Dict], Lis
         }
 
         # Распределяем по командам на основе player_slot
-        if player.get("player_slot", 0) < 128:
-            radiant_players.append(player_data)
-        else:
+        player_slot = player.get("player_slot", 0)
+        is_dire = (player_slot & PLAYER_SLOT_TEAM_BITMASK) != 0
+
+        if is_dire:
             dire_players.append(player_data)
+        else:
+            radiant_players.append(player_data)
 
     return radiant_players, dire_players
 
@@ -1270,9 +1314,9 @@ def apply_secondary_filters(match_details: Dict) -> Tuple[Optional[Dict], Option
 
     players = match_details.get("players", [])
 
-    # Проверка соотношения команд
-    radiant_players = [p for p in players if p.get("player_slot", 0) < 128]
-    dire_players = [p for p in players if p.get("player_slot", 0) >= 128]
+    # Проверка соотношения команд (используем битовую маску)
+    radiant_players = [p for p in players if not (p.get("player_slot", 0) & PLAYER_SLOT_TEAM_BITMASK)]
+    dire_players = [p for p in players if p.get("player_slot", 0) & PLAYER_SLOT_TEAM_BITMASK]
 
     if len(radiant_players) != TEAM_SIZE or len(dire_players) != TEAM_SIZE:
         if ENABLE_DETAILED_STATISTICS:
@@ -1280,7 +1324,7 @@ def apply_secondary_filters(match_details: Dict) -> Tuple[Optional[Dict], Option
         return None, exclusion_stats
 
     # Фильтр по leaver_status
-    if any(player.get("leaver_status", 0) not in [0, 1] for player in players):
+    if any(player.get("leaver_status", 0) not in VALID_LEAVER_STATUSES for player in players):
         if ENABLE_DETAILED_STATISTICS:
             exclusion_stats['excluded_leavers'] = 1
         return None, exclusion_stats
@@ -1339,11 +1383,11 @@ def fetch_match_details(match_id: int) -> Optional[Dict]:
             Возвращает None если не удалось получить данные после всех попыток.
 
     Note:
-        Функция делает до MAX_RETRIES_FOR_MATCH_DETAILS попыток с задержкой RETRY_DELAY между ними.
+        Функция делает до MAX_RETRIES попыток получения данных с задержкой RETRY_DELAY между ними.
     """
     retry_count = 0
 
-    while retry_count < MAX_RETRIES_FOR_MATCH_DETAILS:
+    while retry_count < MAX_RETRIES:
         try:
             url = f"{OPENDOTA_MATCH_DETAILS_URL}/{match_id}"
             response = requests.get(url, timeout=30)
@@ -1353,22 +1397,22 @@ def fetch_match_details(match_id: int) -> Optional[Dict]:
 
         except requests.exceptions.Timeout:
             retry_count += 1
-            if retry_count < MAX_RETRIES_FOR_MATCH_DETAILS:
+            if retry_count < MAX_RETRIES:
                 time.sleep(RETRY_DELAY)
             else:
                 print_status_message(
-                    f"OpenDota API | Таймаут для матча {match_id} после {MAX_RETRIES_FOR_MATCH_DETAILS} попыток",
+                    f"OpenDota API | Таймаут для матча {match_id} после {MAX_RETRIES} попыток",
                     "error",
                     "⏱️"
                 )
 
         except requests.exceptions.RequestException as e:
             retry_count += 1
-            if retry_count < MAX_RETRIES_FOR_MATCH_DETAILS:
+            if retry_count < MAX_RETRIES:
                 time.sleep(RETRY_DELAY)
             else:
                 print_status_message(
-                    f"OpenDota API | Не удалось получить матч {match_id} после {MAX_RETRIES_FOR_MATCH_DETAILS} попыток: {e}",
+                    f"OpenDota API | Не удалось получить матч {match_id} после {MAX_RETRIES} попыток: {e}",
                     "error",
                     "❌"
                 )
@@ -1639,12 +1683,12 @@ def save_matches_to_database(session: Session, processed_matches: List[Dict]) ->
             )
 
             # Объединяем игроков обеих команд для удобства обработки
-            # Добавляем team_number для различения команд
+            # Добавляем team_number для различия команд
             all_players_with_teams = [
-                                         (player_data, 0) for player_data in match_data['radiant_players']
-                                     ] + [
-                                         (player_data, 1) for player_data in match_data['dire_players']
-                                     ]
+                (player_data, RADIANT_INDEX) for player_data in match_data['radiant_players']
+            ] + [
+                (player_data, DIRE_INDEX) for player_data in match_data['dire_players']
+            ]
 
             # Создаём записи игроков
             for player_data, team_number in all_players_with_teams:

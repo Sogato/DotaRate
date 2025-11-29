@@ -44,10 +44,10 @@ from sqlalchemy.orm import sessionmaker
 # Локальные импорты
 from config import (
     DATASET_DATABASE_URL,
-    DIRE_TEAM,
+    DIRE_INDEX,
     DOTA_VERSION,
     EXCLUDED_HERO_IDS,
-    RADIANT_TEAM,
+    RADIANT_INDEX,
     ROLE_MAPPING,
     TEAM_SIZE,
 )
@@ -302,19 +302,19 @@ class HDF5Preprocessor:
                     Match.barracks_status_radiant,
                     Match.barracks_status_dire,
                     # Агрегация героев по командам через array_agg
-                    func.array_agg(MatchPlayer.hero_id).filter(MatchPlayer.team_number == RADIANT_TEAM).label(
+                    func.array_agg(MatchPlayer.hero_id).filter(MatchPlayer.team_number == RADIANT_INDEX).label(
                         "radiant_heroes"),
-                    func.array_agg(MatchPlayer.hero_id).filter(MatchPlayer.team_number == DIRE_TEAM).label(
+                    func.array_agg(MatchPlayer.hero_id).filter(MatchPlayer.team_number == DIRE_INDEX).label(
                         "dire_heroes"),
                     # Агрегация вариантов героев по командам
-                    func.array_agg(MatchPlayer.hero_variant).filter(MatchPlayer.team_number == RADIANT_TEAM).label(
+                    func.array_agg(MatchPlayer.hero_variant).filter(MatchPlayer.team_number == RADIANT_INDEX).label(
                         "radiant_variants"),
-                    func.array_agg(MatchPlayer.hero_variant).filter(MatchPlayer.team_number == DIRE_TEAM).label(
+                    func.array_agg(MatchPlayer.hero_variant).filter(MatchPlayer.team_number == DIRE_INDEX).label(
                         "dire_variants"),
                     # Агрегация ролей игроков по командам
-                    func.array_agg(MatchPlayer.role).filter(MatchPlayer.team_number == RADIANT_TEAM).label(
+                    func.array_agg(MatchPlayer.role).filter(MatchPlayer.team_number == RADIANT_INDEX).label(
                         "radiant_roles"),
-                    func.array_agg(MatchPlayer.role).filter(MatchPlayer.team_number == DIRE_TEAM).label("dire_roles"),
+                    func.array_agg(MatchPlayer.role).filter(MatchPlayer.team_number == DIRE_INDEX).label("dire_roles"),
                 )
                 .join(MatchPlayer, Match.match_id == MatchPlayer.match_id)
                 .filter(Match.match_id.in_(match_ids))  # Фильтрация по предоставленным ID

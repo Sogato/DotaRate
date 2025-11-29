@@ -5,6 +5,8 @@
 получение через Steam API, многоступенчатую фильтрацию, анализ игроков,
 обнаружение аномалий (руинеров, мёртвых матчей) и сохранение в базу данных.
 
+Сбор из API происходит от старых к новым.
+
 Основные этапы обработки:
 1. Первичная фильтрация: базовые критерии (время, режим, длительность, состав)
 2. Вторичная фильтрация: анализ активности, назначение ролей, детекция руинеров
@@ -34,18 +36,10 @@ from sqlalchemy.exc import IntegrityError
 from data_bases.dataset.models import Match, MatchPlayer
 from data_bases.heroes.models import Hero
 from config import (
-    DATASET_DATABASE_URL, HEROES_DATABASE_URL, STEAM_API_KEY, STEAM_API_MATCH_HISTORY_URL,
-    STARTING_MATCH_SEQUENCE_NUMBER, TARGET_MATCHES_COUNT, DATABASE_SAVE_CHUNK_SIZE,
-    BURST_TIME_TIMESTAMP, REQUIRED_MATCH_FIELDS, REQUIRED_PLAYER_FIELDS, ALLOWED_GAME_MODES,
-    ALLOWED_LOBBY_TYPES, MINIMUM_MATCH_DURATION, TEAM_SIZE, MAX_LEVEL_1_RATIO,
-    MAX_ZERO_LASTHITS_RATIO, MIN_TOTAL_LAST_HITS, SUPPORT_ITEM_IDS, HERO_ITEM_EXCEPTIONS,
-    HERO_SUPPORT_SCORE_EXCEPTIONS, SUPPORT_ITEMS_WEIGHT, SUPPORT_SCORE_EXCEPTION_WEIGHT,
-    NET_WORTH_WEIGHT, LAST_HITS_WEIGHT, GPM_WEIGHT, XPM_WEIGHT, CORE_EXPECTED_KDA, CORE_KDA_TOLERANCE,
-    SUPPORT_EXPECTED_KDA, SUPPORT_KDA_TOLERANCE, INCOME_MINIMUM_THRESHOLD, GPM_CALCULATION_START_MINUTE,
-    CORE_BASE_GPM, CORE_GPM_GROWTH_RATE, CORE_MAX_GPM, SUPPORT_BASE_GPM, SUPPORT_GPM_GROWTH_RATE,
-    SUPPORT_MAX_GPM, RUINER_DETECTION_THRESHOLD, RUINER_LOGGING_THRESHOLD, RUINER_EMPTY_SLOTS_LIMIT,
-    RUINER_SAME_ITEMS_LIMIT, TEAM_DEATH_RATIO_WEIGHT, KDA_SCORE_WEIGHT, INCOME_SCORE_WEIGHT,
-    CONTRIBUTION_SCORE_WEIGHT, HERO_RUINER_EXCEPTIONS
+    DATASET_DATABASE_URL, HEROES_DATABASE_URL, STEAM_API_MATCH_HISTORY_URL, STEAM_API_KEY,
+    STARTING_MATCH_SEQUENCE_NUMBER, BURST_TIME_TIMESTAMP, MINIMUM_MATCH_DURATION,
+    TEAM_SIZE, RADIANT_INDEX, DIRE_INDEX, PLAYER_SLOT_TEAM_BITMASK, VALID_LEAVER_STATUSES,
+    SUPPORT_ITEM_IDS, HERO_ITEM_EXCEPTIONS, HERO_SUPPORT_SCORE_EXCEPTIONS, HERO_RUINER_EXCEPTIONS,
 )
 from utils.console import (
     Colors,
@@ -67,14 +61,136 @@ HeroesSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=heroes
 HEROES_CACHE = {}  # {hero_id: localized_name}, загружается при старте
 
 # === КОНСТАНТЫ ОТЛАДКИ ===
-ENABLE_DETAILED_STATISTICS = False  # Детальная статистика обработки каждого API вызова
-ENABLE_RUINER_LOGGING = False       # Подробное логирование процесса детекции руинеров
-ENABLE_ROLE_LOGGING = False         # Логирование процесса назначения ролей игрокам
+ENABLE_DETAILED_STATISTICS = False          # Детальная статистика обработки каждого API вызова
+ENABLE_RUINER_LOGGING = False               # Подробное логирование процесса детекции руинеров
+ENABLE_ROLE_LOGGING = False                 # Логирование процесса назначения ролей игрокам
+
+# === КОНСТАНТЫ КОНФИГУРАЦИИ ===
+TARGET_MATCHES_COUNT = 3_000_000            # Целевое количество матчей для сбора
+DATABASE_SAVE_CHUNK_SIZE = 10_000           # Размер чанка для пакетного сохранения в БД
 
 # === КОНСТАНТЫ API ===
 API_REQUEST_DELAY = 4                       # Задержка между запросами в секундах
 MATCHES_PER_API_REQUEST = 100               # Количество матчей за один запрос (макс 100)
 MAX_CONSECUTIVE_INCOMPLETE_RESPONSES = 5    # Лимит неполных ответов API подряд
+
+# === ПАРАМЕТРЫ ВАЛИДАЦИИ ДАННЫХ ===
+# Обязательные поля для матчей
+REQUIRED_MATCH_FIELDS = {
+    "match_id",                   # Уникальный идентификатор матча (64-bit integer)
+    "match_seq_num",              # Последовательный номер матча для API запросов
+    "radiant_win",                # Победила ли команда Radiant (True/False)
+    "duration",                   # Длительность матча в секундах
+    "start_time",                 # Unix timestamp начала матча
+    "tower_status_radiant",       # Битовая маска состояния башен команды Radiant
+    "tower_status_dire",          # Битовая маска состояния башен команды Dire
+    "barracks_status_radiant",    # Битовая маска состояния казарм команды Radiant
+    "barracks_status_dire",       # Битовая маска состояния казарм команды Dire
+    "lobby_type",                 # Тип лобби (публичный, рейтинговый, приватный и т.д.)
+    "game_mode",                  # Игровой режим (All Pick, Captain's Mode, Random Draft и т.д.)
+    "radiant_score",              # Количество убийств команды Radiant
+    "dire_score",                 # Количество убийств команды Dire
+    "players"                     # Список игроков матча (массив из 10 элементов)
+}
+
+# Обязательные поля для игроков
+REQUIRED_PLAYER_FIELDS = {
+    "account_id",                 # Уникальный ID аккаунта игрока Steam (может быть анонимным)
+    "hero_id",                    # ID выбранного героя (числовой идентификатор)
+    "hero_variant",               # Вариант героя (1 - 6)
+    "team_number",                # Номер команды (0 = Radiant, 1 = Dire)
+    "net_worth",                  # Общая стоимость предметов игрока на конец матча
+    "last_hits",                  # Количество добитых крипов (основной показатель фарма)
+    "denies",                     # Количество заблокированных союзных крипов
+    "gold_per_min",               # Среднее золото в минуту за весь матч
+    "xp_per_min",                 # Средний опыт в минуту за весь матч
+
+    # Предметы в основных слотах (6 основных слотов инвентаря)
+    "item_0",                     # Предмет в слоте 0 (верхний левый)
+    "item_1",                     # Предмет в слоте 1 (верхний средний)
+    "item_2",                     # Предмет в слоте 2 (верхний правый)
+    "item_3",                     # Предмет в слоте 3 (нижний левый)
+    "item_4",                     # Предмет в слоте 4 (нижний средний)
+    "item_5",                     # Предмет в слоте 5 (нижний правый)
+
+    # Предметы в рюкзаке (дополнительное хранилище)
+    "backpack_0",                 # Предмет в рюкзаке слот 0
+    "backpack_1",                 # Предмет в рюкзаке слот 1
+    "backpack_2",                 # Предмет в рюкзаке слот 2
+
+    # Боевая статистика
+    "kills",                      # Количество убийств героев противника
+    "deaths",                     # Количество смертей
+    "assists",                    # Количество помощи в убийствах (ассисты)
+
+    # Дополнительные предметы и характеристики
+    "item_neutral",               # Основной нейтральный предмет
+    "item_neutral2",              # Дополнительный нейтральный предмет
+    "level",                      # Уровень героя на конец игры (1-30)
+    "aghanims_scepter",           # Есть ли Aghanim's Scepter (1/0)
+    "aghanims_shard",             # Есть ли Aghanim's Shard (1/0)
+    "moonshard"                   # Есть ли съеденный Moon Shard (1/0)
+}
+
+# Разрешенные игровые режимы
+ALLOWED_GAME_MODES = {
+    3,          # Random Draft - каждый игрок выбирает из ограниченного пула героев
+    4,          # Single Draft - каждому игроку доступны 3 случайных героя
+    5,          # All Random - полностью случайный выбор героев
+    22          # All Pick (Ranked) - рейтинговые матчи, свободный выбор героев
+}
+
+# Разрешенные типы лобби
+ALLOWED_LOBBY_TYPES = {
+    0,          # Public matchmaking - обычные публичные матчи
+    7           # Ranked matchmaking - рейтинговые матчи
+}
+
+# === ПАРАМЕТРЫ ОПРЕДЕЛЕНИЯ РОЛЕЙ ===
+# Веса компонентов для расчета support_score при назначении роли игроку
+SUPPORT_ITEMS_WEIGHT = 5                    # Вес количества саппорт предметов
+SUPPORT_SCORE_EXCEPTION_WEIGHT = 10         # Бонус для героев из HERO_SUPPORT_SCORE_EXCEPTIONS
+NET_WORTH_WEIGHT = 10                       # Вес net worth (инвертированный)
+LAST_HITS_WEIGHT = 5                        # Вес last hits (инвертированный)
+GPM_WEIGHT = 5                              # Вес GPM (инвертированный)
+XPM_WEIGHT = 5                              # Вес XPM (инвертированный)
+
+# === ПАРАМЕТРЫ ФИЛЬТРАЦИИ "МЁРТВЫХ" МАТЧЕЙ ===
+# Пороговые значения для исключения матчей с ботами/афк игроками
+MAX_LEVEL_1_RATIO = 0.1                     # Максимальная доля игроков на 1 уровне (10%)
+MAX_ZERO_LASTHITS_RATIO = 0.1               # Максимальная доля игроков с 0 last_hits (10%)
+MIN_TOTAL_LAST_HITS = 30                    # Минимальное суммарное количество last_hits на матч
+
+# === ПАРАМЕТРЫ ОПРЕДЕЛЕНИЯ РУИНЕРОВ ===
+# KDA параметры - определение аномально низкой эффективности
+CORE_EXPECTED_KDA = 4.5                     # Ожидаемый KDA для core игроков
+CORE_KDA_TOLERANCE = 4.0                    # Допустимое отклонение KDA для core
+SUPPORT_EXPECTED_KDA = 3.3                  # Ожидаемый KDA для support игроков
+SUPPORT_KDA_TOLERANCE = 2.8                 # Допустимое отклонение KDA для support
+
+# GPM параметры - оценка экономической эффективности
+INCOME_MINIMUM_THRESHOLD = 0.3              # Минимальный процент от ожидаемого дохода (30%)
+GPM_CALCULATION_START_MINUTE = 20           # Минута начала роста ожидаемого GPM
+
+CORE_BASE_GPM = 500                         # Базовый GPM для core
+CORE_GPM_GROWTH_RATE = 6.0                  # Скорость роста GPM за минуту (после 20-й)
+CORE_MAX_GPM = 800                          # Максимальный ожидаемый GPM для core
+
+SUPPORT_BASE_GPM = 300                      # Базовый GPM для support
+SUPPORT_GPM_GROWTH_RATE = 5.0               # Скорость роста GPM за минуту
+SUPPORT_MAX_GPM = 600                       # Максимальный ожидаемый GPM для support
+
+# Пороги классификации руинеров
+RUINER_DETECTION_THRESHOLD = 0.6            # Порог ruiner_index для классификации как руинер
+RUINER_LOGGING_THRESHOLD = 0.5              # Порог для логирования подозрительных случаев
+RUINER_EMPTY_SLOTS_LIMIT = 4                # Макс. пустых слотов (больше = руинер)
+RUINER_SAME_ITEMS_LIMIT = 4                 # Макс. одинаковых предметов (троллинг/фид)
+
+# Веса компонентов ruiner_index
+TEAM_DEATH_RATIO_WEIGHT = 0.25              # Вес доли смертей от командных
+KDA_SCORE_WEIGHT = 0.25                     # Вес отклонения KDA
+INCOME_SCORE_WEIGHT = 0.3                   # Вес экономических показателей
+CONTRIBUTION_SCORE_WEIGHT = 0.2             # Вес вклада в убийства команды
 
 
 def initialize_heroes_cache() -> bool:
@@ -236,7 +352,6 @@ def print_collection_configuration_header(database_state: Dict[str, Any]) -> Non
     Args:
         database_state (Dict[str, Any]): Словарь с информацией о состоянии базы данных
     """
-
     # Не выводим заголовок если база данных уже заполнена
     if database_state['scenario'] == 'complete':
         return
@@ -292,7 +407,7 @@ def print_collection_configuration_header(database_state: Dict[str, Any]) -> Non
 
     print_subsection_header("Предварительная оценка", "⏳", Colors.BRIGHT_YELLOW)
     print_info_line("Примерно API вызовов", f"~{estimated_api_calls:,}", "📡", Colors.BRIGHT_WHITE, Colors.BRIGHT_TEAL)
-    print_info_line("Примерное время работы", f"~{estimated_time_minutes / 60:.1f} часов", "⏰", Colors.BRIGHT_WHITE,
+    print_info_line("Примерное время работы", f"~{estimated_time_minutes / 60:.2f} часов", "⏰", Colors.BRIGHT_WHITE,
                     Colors.BRIGHT_LAVENDER)
 
     print()
@@ -402,10 +517,10 @@ def primary_match_filters(steam_matches: List[Dict]) -> Tuple[List[Dict], Option
                 filter_stats['excluded_missing_keys'] += 1
             continue
 
-        # Проверка количества игроков в командах (должно быть 5v5)
+        # Проверка количества игроков в командах
         players = match.get("players", [])
-        radiant_players = [p for p in players if p.get("team_number") == 0]
-        dire_players = [p for p in players if p.get("team_number") == 1]
+        radiant_players = [p for p in players if p.get("team_number") == RADIANT_INDEX]
+        dire_players = [p for p in players if p.get("team_number") == DIRE_INDEX]
 
         if len(radiant_players) != TEAM_SIZE or len(dire_players) != TEAM_SIZE:
             if ENABLE_DETAILED_STATISTICS:
@@ -462,10 +577,9 @@ def secondary_match_filters(steam_matches: List[Dict]) -> Tuple[List[Dict], Opti
         filter_stats = None
 
     for match in steam_matches:
-        # Фильтр по ливерам - исключаем матчи где кто-то покинул игру
-        # leaver_status: 0 = finished match, 1 = player DC (no abandon), 2+ = abandoned
+        # Фильтр по leaver_status
         players = match.get("players", [])
-        if any(player.get("leaver_status", 0) not in [0, 1] for player in players):
+        if any(player.get("leaver_status", 0) not in VALID_LEAVER_STATUSES for player in players):
             if ENABLE_DETAILED_STATISTICS:
                 filter_stats['excluded_leavers'] += 1
             continue
@@ -488,7 +602,6 @@ def secondary_match_filters(steam_matches: List[Dict]) -> Tuple[List[Dict], Opti
                 filter_stats['excluded_role_assignment'] += 1
             continue
 
-        # Проверяем наличие руинеров в матче
         match_duration_minutes = match.get("duration", 0) / 60
         ruiners_found = []
 
@@ -691,11 +804,14 @@ def extract_and_group_players_data(players: List[Dict]) -> Tuple[List[Dict], Lis
             "moonshard": player.get("moonshard", 0),
         }
 
-        # Распределяем по командам (0 = Radiant, 1 = Dire)
-        if player.get("team_number") == 0:
-            radiant_players.append(player_data)
-        else:
+        # Распределяем по командам на основе player_slot
+        player_slot = player.get("player_slot", 0)
+        is_dire = (player_slot & PLAYER_SLOT_TEAM_BITMASK) != 0
+
+        if is_dire:
             dire_players.append(player_data)
+        else:
+            radiant_players.append(player_data)
 
     return radiant_players, dire_players
 
@@ -1257,7 +1373,8 @@ def print_batch_processing_statistics(stats: Dict) -> None:
 
 def calculate_minimum_expected_matches(requested_count: int) -> int:
     """
-    Вычисляет минимальное ожидаемое количество матчей для определения "заниженного" ответа.
+    Вычисляет минимальное ожидаемое количество матчей для определения "заниженного" ответа от API,
+    которое сигнализирует о достижении актуальных по времени матчей.
 
     Args:
         requested_count (int): Запрашиваемое количество матчей
@@ -1329,12 +1446,12 @@ def save_matches_to_database(session: Session, batch_matches: List[Dict], total_
         )
 
         # Объединяем игроков обеих команд для удобства обработки
-        # Добавляем team_number для различения команд
+        # Добавляем team_number для различия команд
         all_players_with_teams = [
-                                     (player_data, 0) for player_data in match_data['radiant_players']
-                                 ] + [
-                                     (player_data, 1) for player_data in match_data['dire_players']
-                                 ]
+            (player_data, RADIANT_INDEX) for player_data in match_data['radiant_players']
+        ] + [
+            (player_data, DIRE_INDEX) for player_data in match_data['dire_players']
+        ]
 
         # Создаем записи игроков
         for player_data, team_number in all_players_with_teams:
@@ -1576,7 +1693,8 @@ def main() -> None:
         current_batch_for_saving = []
         api_calls_counter = 0
 
-        # Накопительная статистика (только если включено детальное логирование)
+        # Инициализация накопительной статистики (только если включено детальное логирование)
+        accumulated_statistics = None
         if ENABLE_DETAILED_STATISTICS:
             accumulated_statistics = {
                 'api_input': 0,
