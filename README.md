@@ -28,6 +28,8 @@ Dota Rate - это система машинного обучения для п�
 - **ROI**: до 31.50% на высокоуверенных прогнозах
 - **Покрытие**: 7 игровых патчей Dota 2 (7.34d - 7.37d)
 
+## Демонстрация работы оригинальной системы
+
 ---
 > 💡 **Справка: Пороги уверенности**
 > 
@@ -48,12 +50,9 @@ Dota Rate - это система машинного обучения для п�
 > В хорошо откалиброванной модели точность предсказаний должна соответствует порогу уверенности. Чем выше выходное значение, тем выше должна быть точность. Например, при пороге >60% модель должна быть права хотя бы в 60% случаев.
 ---
 
-## Демонстрация работы оригинальной системы
-
-
 ### Информация о матче
 <p align="center">
-  <img src="docs/screenshots/bot_prediction.png" width="500">
+  <img src="docs/screenshots/bot_prediction.png" width="60%">
 </p>
 
 Пример сообщения от Telegram бота с прогнозом на матч.
@@ -66,7 +65,7 @@ Dota Rate - это система машинного обучения для п�
 
 ### Статистика и аналитика
 <p align="center">
-  <img src="docs/screenshots/patch_stats.png" width="500">
+  <img src="docs/screenshots/patch_stats.png" width="60%">
 </p>
 
 Пример сводки за игровой патч
@@ -80,7 +79,7 @@ Dota Rate - это система машинного обучения для п�
 ### Агрегированные результаты за период эксплуатации
 
 <p align="center">
-  <img src="docs/screenshots/matches_by_patch.png" width="80%">
+  <img src="docs/screenshots/matches_by_patch.png" width="70%">
 </p>
 
 Общее количество матчей
@@ -94,7 +93,7 @@ Dota Rate - это система машинного обучения для п�
 <br>
 
 <p align="center">
-  <img src="docs/screenshots/profit_by_patch.png" width="80%">
+  <img src="docs/screenshots/profit_by_patch.png" width="70%">
 </p>
 
 Симуляция ставок
@@ -108,7 +107,7 @@ Dota Rate - это система машинного обучения для п�
 <br>
 
 <p align="center">
-  <img src="docs/screenshots/roi_table.png" width="80%">
+  <img src="docs/screenshots/roi_table.png" width="70%">
 </p>
 
 
