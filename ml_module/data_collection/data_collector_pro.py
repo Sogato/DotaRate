@@ -149,6 +149,7 @@ def initialize_heroes_cache() -> bool:
     Raises:
         Exception: При ошибках подключения к БД или отсутствии данных
     """
+
     global HEROES_CACHE
 
     heroes_session = HeroesSessionLocal()
@@ -189,6 +190,7 @@ def get_hero_name_by_id(hero_id: int) -> str:
     Returns:
         str: Локализованное название героя или "Unknown Hero (ID: X)" если не найден
     """
+
     return HEROES_CACHE.get(hero_id, f"Unknown Hero (ID: {hero_id})")
 
 
@@ -226,6 +228,7 @@ def analyze_database_state(session: Session) -> Dict[str, Any]:
         Функция автоматически выводит детальную информацию о состоянии БД
         и определённом сценарии с цветным форматированием.
     """
+
     print_section_header("АНАЛИЗ БАЗЫ ДАННЫХ", "🔍", color=Colors.BRIGHT_CYAN)
 
     existing_count = session.query(func.count(ProMatch.match_id)).scalar() or 0
@@ -234,7 +237,6 @@ def analyze_database_state(session: Session) -> Dict[str, Any]:
     if existing_count == 0:
         print_subsection_header("Состояние базы данных", "📊", Colors.BRIGHT_YELLOW)
         print_info_line("Матчей в БД", "0", "📊", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
-        print()
 
         print_subsection_header("Определён сценарий сбора", "🎯", Colors.BRIGHT_GREEN)
         print_info_line("Сценарий", "НАЧАЛЬНЫЙ СБОР", "🆕", Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN)
@@ -469,6 +471,7 @@ def print_collection_configuration(db_state: Dict[str, Any]) -> None:
         Функция не выводит ничего если тип сценария SCENARIO_COMPLETE,
         так как в этом случае сбор не требуется.
     """
+
     # Не выводим заголовок если база данных уже заполнена
     if db_state['scenario'] == SCENARIO_COMPLETE:
         return
@@ -519,6 +522,7 @@ def print_collection_configuration(db_state: Dict[str, Any]) -> None:
                     Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN if ENABLE_DETAILED_STATISTICS else Colors.BRIGHT_RED)
     print_info_line("Логирование ролей", "ВКЛ" if ENABLE_ROLE_LOGGING else "ВЫКЛ", "👥",
                     Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN if ENABLE_ROLE_LOGGING else Colors.BRIGHT_RED)
+    print()
 
 
 def print_stage1_batch_processing_statistics(stats: Dict) -> None:
@@ -537,6 +541,7 @@ def print_stage1_batch_processing_statistics(stats: Dict) -> None:
         Вывод производится только если ENABLE_DETAILED_STATISTICS=True
         и есть хотя бы одно исключение для отображения.
     """
+
     if not ENABLE_DETAILED_STATISTICS:
         return
 
@@ -603,6 +608,7 @@ def print_stage1_batch_progress(batch_num: int, batch_size: int, filtered_size: 
         Для сценария BACKFILL прогресс-бар не отображается, так как целью
         является достижение BURST_TIME, а не определённого количества матчей.
     """
+
     print(f"{Colors.BRIGHT_BLUE}📡 Batch #{batch_num}{Colors.RESET} | "
           f"Получено: {Colors.BRIGHT_YELLOW}{batch_size}{Colors.RESET} → "
           f"Прошло фильтры: {Colors.BRIGHT_ORANGE}{filtered_size}{Colors.RESET} → "
@@ -646,6 +652,7 @@ def apply_primary_filters(pro_matches: List[Dict]) -> Tuple[List[Dict], Optional
     Note:
         Матчи, не прошедшие фильтрацию, просто пропускаются без сохранения.
     """
+
     filtered_matches = []
 
     # Инициализируем статистику (если включено детальное логирование)
@@ -717,6 +724,7 @@ def fetch_pro_matches_list(less_than_match_id: Optional[int] = None) -> Optional
     Note:
         Функция делает до MAX_RETRIES попыток с задержкой RETRY_DELAY между ними.
     """
+
     retry_count = 0
 
     while retry_count < MAX_RETRIES:
@@ -799,6 +807,7 @@ def collect_pro_matches(target_count: int, db_state: Dict,
         Функция автоматически обновляет accumulated_stats при каждом батче,
         если ENABLE_DETAILED_STATISTICS=True.
     """
+
     print_section_header("ЭТАП 1: СБОР СПИСКА МАТЧЕЙ", "📋", color=Colors.BRIGHT_BLUE)
 
     scenario = db_state['scenario']
@@ -917,6 +926,7 @@ def print_stage2_match_progress(index: int, total: int, match_id: int, status: s
         failed (int): Общее количество неудачных обработок (failed + filtered)
         skipped (int): Общее количество пропущенных матчей
     """
+
     status_icons = {
         'success': ('🔍', Colors.BRIGHT_GREEN),
         'filtered': ('⚠️', Colors.BRIGHT_YELLOW),
@@ -926,12 +936,11 @@ def print_stage2_match_progress(index: int, total: int, match_id: int, status: s
 
     icon, color = status_icons.get(status, ('❓', Colors.BRIGHT_WHITE))
 
-    print(f"{color}{icon} Обработка #{index + 1}{Colors.RESET} | "
+    print(f"{color}{icon} Матч [{index + 1}/{total}]{Colors.RESET} | "
           f"Match ID: {Colors.BRIGHT_YELLOW}{match_id}{Colors.RESET} | "
-          f"Обработано: {Colors.BRIGHT_GREEN}{successful}{Colors.RESET}/"
-          f"{Colors.BRIGHT_CYAN}{total}{Colors.RESET} | "
+          f"Принято: {Colors.BRIGHT_GREEN}{successful}{Colors.RESET} | "
           f"Пропущено: {Colors.BRIGHT_BLUE}{skipped}{Colors.RESET} | "
-          f"Ошибок: {Colors.BRIGHT_RED}{failed}{Colors.RESET} | "
+          f"Сбоев: {Colors.BRIGHT_RED}{failed}{Colors.RESET} | "
           f"⏱️ {Colors.BRIGHT_MAGENTA}{detail_time:.2f}с{Colors.RESET}")
 
     print_progress_bar(index + 1, total, "Прогресс:", 25)
@@ -952,6 +961,7 @@ def log_team_role_assignment(team_players: List[Dict]) -> None:
         Вывод производится только если ENABLE_ROLE_LOGGING=True.
         Функция используется исключительно для отладки алгоритма назначения ролей.
     """
+
     for player in team_players:
         hero_name = get_hero_name_by_id(player['hero_id'])
         role_color = Colors.BRIGHT_RED if player["role"] == "support" else Colors.BRIGHT_BLUE
@@ -1000,6 +1010,7 @@ def calculate_player_support_score(player: Dict, team_stats: Dict) -> float:
         Учитываются исключения саппорт-предметов для конкретных героев из HERO_ITEM_EXCEPTIONS
         и дополнительный бонус для героев из HERO_SUPPORT_SCORE_EXCEPTIONS
     """
+
     hero_id = player.get("hero_id")
     hero_variant = player.get("hero_variant", 0)
     support_items_count = 0
@@ -1073,6 +1084,7 @@ def assign_player_roles(team_players: List[Dict]) -> List[Dict]:
         Функция изменяет исходный список, добавляя ключи "support_score" и "role"
         к каждому словарю игрока.
     """
+
     if len(team_players) != TEAM_SIZE:
         raise ValueError("Команда должна состоять из 5 игроков.")
 
@@ -1136,6 +1148,7 @@ def extract_and_group_players_data(players: List[Dict]) -> Tuple[List[Dict], Lis
             - Боевая статистика: kills, deaths, assists
             - Дополнительно: level, aghanims_scepter, aghanims_shard, moonshard
     """
+
     radiant_players = []
     dire_players = []
 
@@ -1218,6 +1231,7 @@ def is_dead_match(players: List[Dict], match_id: str) -> bool:
         При обнаружении мёртвого матча выводится детальная информация
         о причинах, если включён ENABLE_DETAILED_STATISTICS.
     """
+
     if not players:
         return True
 
@@ -1294,6 +1308,7 @@ def apply_secondary_filters(match_details: Dict) -> Tuple[Optional[Dict], Option
                 Содержит счётчики: excluded_leavers, excluded_dead_match,
                 excluded_role_assignment, excluded_player_count, excluded_none_details
     """
+
     # Статистика только если включена детальная отладка
     if ENABLE_DETAILED_STATISTICS:
         exclusion_stats = {
@@ -1363,7 +1378,7 @@ def apply_secondary_filters(match_details: Dict) -> Tuple[Optional[Dict], Option
     return match_details, exclusion_stats
 
 
-def fetch_match_details(match_id: int) -> Optional[Dict]:
+def fetch_match_details(match_id: int) -> Tuple[Optional[Dict], bool]:
     """
     Получает детальные данные конкретного матча из OpenDota API.
 
@@ -1375,25 +1390,61 @@ def fetch_match_details(match_id: int) -> Optional[Dict]:
         match_id (int): Уникальный идентификатор матча для запроса деталей
 
     Returns:
-        Optional[Dict]: Словарь с детальными данными матча, включающий:
-            - Основную информацию (match_id, duration, winner и т.д.)
-            - Список игроков с полной статистикой
-            - Информацию о постройках
-            - Временные метки событий
-            Возвращает None если не удалось получить данные после всех попыток.
+        Tuple[Optional[Dict], bool]: Кортеж (данные матча, флаг rate limit):
+            - (Dict, False)  — успешный ответ API. Dict включает:
+                - Основную информацию (match_id, duration, winner и т.д.)
+                - Список игроков с полной статистикой
+                - Информацию о постройках
+                - Временные метки событий
+            - (None, True)   — сервер заблокировал запросы, дальнейшие попытки бессмысленны
+            - (None, False)  — другая ошибка (таймаут, сетевая и т.д.)
 
     Note:
         Функция делает до MAX_RETRIES попыток получения данных с задержкой RETRY_DELAY между ними.
+        При обнаружении 429 флаг rate_limited выставляется немедленно и сохраняется
+        до исчерпания всех попыток, после чего сигнализирует вызывающему коду о необходимости
+        остановки дальнейших запросов.
     """
+
     retry_count = 0
+    rate_limited = False
 
     while retry_count < MAX_RETRIES:
         try:
             url = f"{OPENDOTA_MATCH_DETAILS_URL}/{match_id}"
             response = requests.get(url, timeout=30)
             response.raise_for_status()
+            return response.json(), False
 
-            return response.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 429:
+                rate_limited = True
+                retry_count += 1
+                if retry_count < MAX_RETRIES:
+                    print_status_message(
+                        f"OpenDota API | Слишком много запросов, сервер просит подождать. "
+                        f"Попытка {retry_count}/{MAX_RETRIES}, повтор через {RETRY_DELAY} сек...",
+                        "warning",
+                        "⏳"
+                    )
+                    time.sleep(RETRY_DELAY)
+                else:
+                    print_status_message(
+                        f"OpenDota API | Сервер продолжает отклонять запросы после {MAX_RETRIES} попыток "
+                        f"для матча {match_id}. Останавливаем сбор и сохраняем собранные данные.",
+                        "error",
+                        "❌"
+                    )
+            else:
+                retry_count += 1
+                if retry_count < MAX_RETRIES:
+                    time.sleep(RETRY_DELAY)
+                else:
+                    print_status_message(
+                        f"OpenDota API | HTTP ошибка для матча {match_id} после {MAX_RETRIES} попыток: {e}",
+                        "error",
+                        "❌"
+                    )
 
         except requests.exceptions.Timeout:
             retry_count += 1
@@ -1417,7 +1468,7 @@ def fetch_match_details(match_id: int) -> Optional[Dict]:
                     "❌"
                 )
 
-    return None
+    return None, rate_limited
 
 
 def collect_and_process_match_details(pro_matches_list: List[Dict], db_state: Dict,
@@ -1435,6 +1486,9 @@ def collect_and_process_match_details(pro_matches_list: List[Dict], db_state: Di
     - BACKFILL: проверяет существование в БД ПЕРЕД запросом API, останавливается при достижении цели
     - INITIAL/UPDATE: запрашивает детали для всех матчей
 
+    При превышении rate limit API (429) цикл немедленно прерывается,
+    а все уже успешно обработанные матчи передаются на сохранение в БД.
+
     Args:
         pro_matches_list (List[Dict]): Список матчей с Этапа 1 (после первичной фильтрации)
         db_state (Dict): Состояние БД и сценарий сбора
@@ -1446,7 +1500,9 @@ def collect_and_process_match_details(pro_matches_list: List[Dict], db_state: Di
             - List[Tuple[Dict, Dict]]: Список пар (pro_match, match_details) успешно обработанных матчей
             - int: Количество успешно обработанных матчей
             - int: Количество вызовов API
-            - Dict: Дополнительная статистика Этапа 2
+            - Dict: Дополнительная статистика Этапа 2, включая:
+                - skipped (int): пропущенные дубликаты (BACKFILL)
+                - rate_limit_stopped (bool): была ли прервана обработка из-за rate limit
     """
     print_section_header("ЭТАП 2: ДЕТАЛЬНАЯ ОБРАБОТКА", "🔍", color=Colors.BRIGHT_GREEN)
 
@@ -1494,8 +1550,24 @@ def collect_and_process_match_details(pro_matches_list: List[Dict], db_state: Di
             continue
 
         # Получаем детальные данные матча
-        match_details = fetch_match_details(match_id)
+        match_details, rate_limited = fetch_match_details(match_id)
         api_calls += 1
+
+        # При rate limit прерываем цикл и сохраняем всё уже обработанное
+        if rate_limited:
+            print()
+            print_status_message(
+                f"Сервер временно заблокировал запросы. Остановка на матче {match_id} "
+                f"({index} из {len(pro_matches_list)} обработано). "
+                f"Сохраняем {successful_count} успешно собранных матчей.",
+                "warning",
+                "🛑"
+            )
+            print()
+            return processed_matches, successful_count, api_calls, {
+                'skipped': skipped_count,
+                'rate_limit_stopped': True
+            }
 
         if match_details:
             # Применяем вторичную фильтрацию
@@ -1516,7 +1588,7 @@ def collect_and_process_match_details(pro_matches_list: List[Dict], db_state: Di
                 filtered_count += 1
                 status = 'filtered'
         else:
-            # Не удалось получить детали
+            # Не удалось получить детали матча (не rate limit)
             failed_count += 1
             status = 'failed'
 
@@ -1528,6 +1600,7 @@ def collect_and_process_match_details(pro_matches_list: List[Dict], db_state: Di
                                     skipped_count)
 
         time.sleep(API_REQUEST_DELAY)
+    print()
 
     # === ДЕТАЛЬНАЯ СТАТИСТИКА ВТОРИЧНОЙ ФИЛЬТРАЦИИ ===
     if ENABLE_DETAILED_STATISTICS and accumulated_stats:
@@ -1558,7 +1631,10 @@ def collect_and_process_match_details(pro_matches_list: List[Dict], db_state: Di
                 print_info_line(reason_name, f"{count:,}", emoji, Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
             print()
 
-    return processed_matches, successful_count, api_calls, {'skipped': skipped_count}
+    return processed_matches, successful_count, api_calls, {
+        'skipped': skipped_count,
+        'rate_limit_stopped': False
+    }
 
 
 def create_database_match_record(pro_match_data: Dict, match_details: Dict) -> Dict:
@@ -1581,6 +1657,7 @@ def create_database_match_record(pro_match_data: Dict, match_details: Dict) -> D
             - Статус построек (башни, бараки)
             - Обработанных игроков обеих команд с назначенными ролями
     """
+
     return {
         # Основная информация о матче
         "match_id": match_details["match_id"],
@@ -1640,6 +1717,7 @@ def save_matches_to_database(session: Session, processed_matches: List[Dict]) ->
         IntegrityError: При нарушении ограничений БД (дубликаты и т.д.)
         Exception: При других ошибках БД
     """
+
     if not processed_matches:
         return 0
 
@@ -1753,6 +1831,7 @@ def save_matches_to_database(session: Session, processed_matches: List[Dict]) ->
         return 0
 
 
+
 def print_final_collection_statistics(total_saved: int, total_processed: int,
                                       total_found: int, total_api_calls: int,
                                       program_start_time: float, db_state: Dict,
@@ -1773,7 +1852,8 @@ def print_final_collection_statistics(total_saved: int, total_processed: int,
         program_start_time (float): Время запуска программы (timestamp)
         db_state (Dict): Состояние БД и сценарий
         accumulated_stats (Optional[Dict]): Накопительная статистика исключений
-        stage2_stats (Optional[Dict]): Статистика Этапа 2 (пропущенные дубликаты)
+        stage2_stats (Optional[Dict]): Статистика Этапа 2 (пропущенные дубликаты,
+            флаг досрочной остановки из-за блокировки сервера)
 
     Note:
         Функция не выводит ничего если сценарий SCENARIO_COMPLETE,
@@ -1812,6 +1892,10 @@ def print_final_collection_statistics(total_saved: int, total_processed: int,
     print_info_line("Найдено в API", f"{total_found:,}", "🔍", Colors.BRIGHT_WHITE, Colors.BRIGHT_CYAN)
     print_info_line("Детально обработано", f"{total_processed:,}", "🔬", Colors.BRIGHT_WHITE, Colors.BRIGHT_PURPLE)
     print_info_line("Сохранено в БД", f"{total_saved:,} матчей", "✅", Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN)
+
+    if stage2_stats and stage2_stats.get('rate_limit_stopped'):
+        print_info_line("Причина остановки", "Сервер временно заблокировал запросы", "⚠️",
+                        Colors.BRIGHT_WHITE, Colors.BRIGHT_ORANGE)
 
     final_total = db_state['existing_count'] + total_saved
     print_info_line("Итого в БД", f"{final_total:,} матчей", "🏆", Colors.BRIGHT_WHITE, Colors.BRIGHT_GOLD)
@@ -1868,6 +1952,7 @@ def main() -> None:
     Raises:
         Exception: При критических ошибках инициализации или работы с БД
     """
+
     # Инициализация кэша героев
     if not initialize_heroes_cache():
         print_status_message("КРИТИЧЕСКАЯ ОШИБКА: Не удалось загрузить данных героев!", "error", "💥")
