@@ -34,13 +34,13 @@ from sqlalchemy.exc import IntegrityError
 
 # Локальные импорты
 from data_bases.dataset.models import Match, MatchPlayer
-from data_bases.heroes.models import Hero
 from config import (
-    DATASET_DATABASE_URL, HEROES_DATABASE_URL, STEAM_API_MATCH_HISTORY_URL, STEAM_API_KEY,
-    STARTING_MATCH_SEQUENCE_NUMBER, BURST_TIME_TIMESTAMP, MINIMUM_MATCH_DURATION,
-    TEAM_SIZE, RADIANT_INDEX, DIRE_INDEX, PLAYER_SLOT_TEAM_BITMASK, VALID_LEAVER_STATUSES,
+    DATASET_DATABASE_URL, STEAM_API_MATCH_HISTORY_URL, STEAM_API_KEY, STARTING_MATCH_SEQUENCE_NUMBER,
+    BURST_TIME_TIMESTAMP, MINIMUM_MATCH_DURATION, TEAM_SIZE, RADIANT_INDEX, DIRE_INDEX, PLAYER_SLOT_TEAM_BITMASK,
+    REQUIRED_PLAYER_FIELDS, REQUIRED_MATCH_FIELDS, ALLOWED_GAME_MODES, ALLOWED_LOBBY_TYPES, VALID_LEAVER_STATUSES,
     SUPPORT_ITEM_IDS, HERO_ITEM_EXCEPTIONS, HERO_SUPPORT_SCORE_EXCEPTIONS, HERO_RUINER_EXCEPTIONS,
 )
+from utils.hero_cache import HeroCache
 from utils.console import (
     Colors,
     print_section_header,
@@ -54,11 +54,8 @@ from utils.console import (
 dataset_engine = create_engine(DATASET_DATABASE_URL)
 DatasetSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=dataset_engine)
 
-heroes_engine = create_engine(HEROES_DATABASE_URL)
-HeroesSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=heroes_engine)
-
-# === ГЛОБАЛЬНЫЙ КЭШ ===
-HEROES_CACHE = {}  # {hero_id: localized_name}, загружается при старте
+# === КЭШ HEROES DATABASE ===
+hero_cache = HeroCache()
 
 # === КОНСТАНТЫ ОТЛАДКИ ===
 ENABLE_DETAILED_STATISTICS = False          # Детальная статистика обработки каждого API вызова
@@ -73,78 +70,6 @@ DATABASE_SAVE_CHUNK_SIZE = 10_000           # Размер чанка для п�
 API_REQUEST_DELAY = 4                       # Задержка между запросами в секундах
 MATCHES_PER_API_REQUEST = 100               # Количество матчей за один запрос (макс 100)
 MAX_CONSECUTIVE_INCOMPLETE_RESPONSES = 5    # Лимит неполных ответов API подряд
-
-# === ПАРАМЕТРЫ ВАЛИДАЦИИ ДАННЫХ ===
-# Обязательные поля для матчей
-REQUIRED_MATCH_FIELDS = {
-    "match_id",                   # Уникальный идентификатор матча (64-bit integer)
-    "match_seq_num",              # Последовательный номер матча для API запросов
-    "radiant_win",                # Победила ли команда Radiant (True/False)
-    "duration",                   # Длительность матча в секундах
-    "start_time",                 # Unix timestamp начала матча
-    "tower_status_radiant",       # Битовая маска состояния башен команды Radiant
-    "tower_status_dire",          # Битовая маска состояния башен команды Dire
-    "barracks_status_radiant",    # Битовая маска состояния казарм команды Radiant
-    "barracks_status_dire",       # Битовая маска состояния казарм команды Dire
-    "lobby_type",                 # Тип лобби (публичный, рейтинговый, приватный и т.д.)
-    "game_mode",                  # Игровой режим (All Pick, Captain's Mode, Random Draft и т.д.)
-    "radiant_score",              # Количество убийств команды Radiant
-    "dire_score",                 # Количество убийств команды Dire
-    "players"                     # Список игроков матча (массив из 10 элементов)
-}
-
-# Обязательные поля для игроков
-REQUIRED_PLAYER_FIELDS = {
-    "account_id",                 # Уникальный ID аккаунта игрока Steam (может быть анонимным)
-    "hero_id",                    # ID выбранного героя (числовой идентификатор)
-    "hero_variant",               # Вариант героя (1 - 6)
-    "team_number",                # Номер команды (0 = Radiant, 1 = Dire)
-    "net_worth",                  # Общая стоимость предметов игрока на конец матча
-    "last_hits",                  # Количество добитых крипов (основной показатель фарма)
-    "denies",                     # Количество заблокированных союзных крипов
-    "gold_per_min",               # Среднее золото в минуту за весь матч
-    "xp_per_min",                 # Средний опыт в минуту за весь матч
-
-    # Предметы в основных слотах (6 основных слотов инвентаря)
-    "item_0",                     # Предмет в слоте 0 (верхний левый)
-    "item_1",                     # Предмет в слоте 1 (верхний средний)
-    "item_2",                     # Предмет в слоте 2 (верхний правый)
-    "item_3",                     # Предмет в слоте 3 (нижний левый)
-    "item_4",                     # Предмет в слоте 4 (нижний средний)
-    "item_5",                     # Предмет в слоте 5 (нижний правый)
-
-    # Предметы в рюкзаке (дополнительное хранилище)
-    "backpack_0",                 # Предмет в рюкзаке слот 0
-    "backpack_1",                 # Предмет в рюкзаке слот 1
-    "backpack_2",                 # Предмет в рюкзаке слот 2
-
-    # Боевая статистика
-    "kills",                      # Количество убийств героев противника
-    "deaths",                     # Количество смертей
-    "assists",                    # Количество помощи в убийствах (ассисты)
-
-    # Дополнительные предметы и характеристики
-    "item_neutral",               # Основной нейтральный предмет
-    "item_neutral2",              # Дополнительный нейтральный предмет
-    "level",                      # Уровень героя на конец игры (1-30)
-    "aghanims_scepter",           # Есть ли Aghanim's Scepter (1/0)
-    "aghanims_shard",             # Есть ли Aghanim's Shard (1/0)
-    "moonshard"                   # Есть ли съеденный Moon Shard (1/0)
-}
-
-# Разрешенные игровые режимы
-ALLOWED_GAME_MODES = {
-    3,          # Random Draft - каждый игрок выбирает из ограниченного пула героев
-    4,          # Single Draft - каждому игроку доступны 3 случайных героя
-    5,          # All Random - полностью случайный выбор героев
-    22          # All Pick (Ranked) - рейтинговые матчи, свободный выбор героев
-}
-
-# Разрешенные типы лобби
-ALLOWED_LOBBY_TYPES = {
-    0,          # Public matchmaking - обычные публичные матчи
-    7           # Ranked matchmaking - рейтинговые матчи
-}
 
 # === ПАРАМЕТРЫ ОПРЕДЕЛЕНИЯ РОЛЕЙ ===
 # Веса компонентов для расчета support_score при назначении роли игроку
@@ -191,62 +116,6 @@ TEAM_DEATH_RATIO_WEIGHT = 0.25              # Вес доли смертей о�
 KDA_SCORE_WEIGHT = 0.25                     # Вес отклонения KDA
 INCOME_SCORE_WEIGHT = 0.3                   # Вес экономических показателей
 CONTRIBUTION_SCORE_WEIGHT = 0.2             # Вес вклада в убийства команды
-
-
-def initialize_heroes_cache() -> bool:
-    """
-    Инициализирует кэш героев из базы данных для быстрого доступа.
-
-    Загружает всех героев из БД в память в формате {hero_id: localized_name}
-    для избежания множественных запросов при обработке матчей.
-
-    Returns:
-        bool: True если кэш успешно загружен, False в случае ошибки
-
-    Raises:
-        Exception: При ошибках подключения к БД или отсутствии данных
-    """
-    global HEROES_CACHE
-
-    heroes_session = HeroesSessionLocal()
-    try:
-        if ENABLE_DETAILED_STATISTICS:
-            print_status_message("Загрузка данных героев из базы данных...", "info", "📚")
-
-        heroes = heroes_session.query(Hero).all()
-
-        if not heroes:
-            if ENABLE_DETAILED_STATISTICS:
-                print_status_message("ВНИМАНИЕ: База данных героев пуста!", "warning", "⚠️")
-            return False
-
-        # Заполняем кэш словарем {id: localized_name}
-        for hero in heroes:
-            HEROES_CACHE[hero.id] = hero.localized_name
-
-        if ENABLE_DETAILED_STATISTICS:
-            print_status_message(f"Загружено {len(HEROES_CACHE)} героев в кэш", "success", "✅")
-        return True
-
-    except Exception as e:
-        print_status_message(f"Ошибка при загрузке героев из БД: {e}", "error", "❌")
-        return False
-
-    finally:
-        heroes_session.close()
-
-
-def get_hero_name_by_id(hero_id: int) -> str:
-    """
-    Получает название героя по его ID из кэша.
-
-    Args:
-        hero_id (int): Уникальный идентификатор героя
-
-    Returns:
-        str: Локализованное название героя или "Unknown Hero (ID: X)" если не найден
-    """
-    return HEROES_CACHE.get(hero_id, f"Unknown Hero (ID: {hero_id})")
 
 
 def analyze_database_state(session: Session) -> Dict[str, Any]:
@@ -585,7 +454,7 @@ def secondary_match_filters(steam_matches: List[Dict]) -> Tuple[List[Dict], Opti
             continue
 
         # Фильтрация мёртвых матчей
-        if is_dead_match(players, match.get("match_id", "неизвестен")):
+        if is_dead_match(players, match["match_id"]):
             if ENABLE_DETAILED_STATISTICS:
                 filter_stats['excluded_dead_match'] += 1
             continue
@@ -626,7 +495,7 @@ def secondary_match_filters(steam_matches: List[Dict]) -> Tuple[List[Dict], Opti
                 print_info_line("Match ID", f"{match['match_id']}", "🆔", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
                 print_info_line("Всего руинеров", f"{len(ruiners_found)}", "💀", Colors.BRIGHT_WHITE, Colors.BRIGHT_RED)
                 for team, player in ruiners_found:
-                    hero_name = get_hero_name_by_id(player['hero_id'])
+                    hero_name = hero_cache.get_hero_name(player['hero_id'])
                     print_info_line(f"{team} команда", f"{hero_name} (ID: {player['account_id']})", "🏴",
                                     Colors.BRIGHT_WHITE, Colors.CORAL)
 
@@ -658,7 +527,7 @@ def secondary_match_filters(steam_matches: List[Dict]) -> Tuple[List[Dict], Opti
     return filtered_matches, filter_stats
 
 
-def is_dead_match(players: List[Dict], match_id: str) -> bool:
+def is_dead_match(players: List[Dict], match_id: int) -> bool:
     """
     Определяет, является ли матч "мёртвым" (все игроки покинули игру в начале).
 
@@ -993,7 +862,7 @@ def log_team_role_assignment(team_players: List[Dict]) -> None:
         team_players (List[Dict]): Список игроков команды с назначенными ролями
     """
     for player in team_players:
-        hero_name = get_hero_name_by_id(player['hero_id'])
+        hero_name = hero_cache.get_hero_name(player['hero_id'])
         role_color = Colors.BRIGHT_RED if player["role"] == "support" else Colors.BRIGHT_BLUE
 
         # Проверяем, использовался ли бонус SUPPORT_SCORE_EXCEPTION_WEIGHT для support_score
@@ -1186,7 +1055,7 @@ def log_ruiner_detection_details(match_id: int, player: Dict, ruiner_index: floa
     """
     status = "РУИНЕР" if ruiner_index > RUINER_DETECTION_THRESHOLD else "ПОДОЗРЕНИЕ"
     status_color = Colors.BRIGHT_RED if ruiner_index > RUINER_DETECTION_THRESHOLD else Colors.BRIGHT_YELLOW
-    hero_name = get_hero_name_by_id(player['hero_id'])
+    hero_name = hero_cache.get_hero_name(player['hero_id'])
 
     print_subsection_header(f"DEBUG | Определение руинеров: {status}", "🔍", status_color)
 
@@ -1267,6 +1136,8 @@ def process_match_batch(steam_matches: List[Dict]) -> Tuple[List[Dict], Dict]:
 
     # Объединение статистики (только если включено детальное логирование)
     if ENABLE_DETAILED_STATISTICS:
+        assert primary_stats is not None
+        assert secondary_stats is not None
         combined_statistics = {
             'api_input': primary_stats['input_count'],
             'primary_filtered': primary_stats['output_count'],
@@ -1653,7 +1524,7 @@ def main() -> None:
         Exception: При критических ошибках инициализации или работы с БД
     """
     # Инициализация кэша героев
-    if not initialize_heroes_cache():
+    if not hero_cache.initialize():
         print_status_message("КРИТИЧЕСКАЯ ОШИБКА: Не удалось загрузить данные героев!", "error", "💥")
         print_status_message("Убедитесь, что база данных героев существует и заполнена.", "warning", "⚠️")
         return
@@ -1758,14 +1629,29 @@ def main() -> None:
 
             # Обновляем накопительную статистику (только если включено)
             if ENABLE_DETAILED_STATISTICS:
+                assert accumulated_statistics is not None
+
                 accumulated_statistics['api_input'] += batch_statistics['api_input']
                 accumulated_statistics['primary_filtered'] += batch_statistics['primary_filtered']
                 accumulated_statistics['secondary_filtered'] += batch_statistics['secondary_filtered']
                 accumulated_statistics['final_processed'] += batch_statistics['final_processed']
 
-                for category in ['primary_exclusions', 'secondary_exclusions']:
-                    for reason, count in batch_statistics[category].items():
-                        accumulated_statistics[category][reason] += count
+                # Извлекаем вложенные словари в отдельные переменные,
+                # чтобы анализатор точно знал их тип
+                acc_primary = accumulated_statistics['primary_exclusions']
+                acc_secondary = accumulated_statistics['secondary_exclusions']
+                batch_primary = batch_statistics['primary_exclusions']
+                batch_secondary = batch_statistics['secondary_exclusions']
+
+                assert isinstance(acc_primary, dict)
+                assert isinstance(acc_secondary, dict)
+                assert isinstance(batch_primary, dict)
+                assert isinstance(batch_secondary, dict)
+
+                for reason, count in batch_primary.items():
+                    acc_primary[reason] += count
+                for reason, count in batch_secondary.items():
+                    acc_secondary[reason] += count
 
             # Определяем количество матчей в текущем батче
             current_batch_size = len(processed_matches)

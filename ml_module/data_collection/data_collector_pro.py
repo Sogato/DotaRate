@@ -70,18 +70,18 @@ from typing import Dict, List, Tuple, Any, Optional
 
 # Сторонние библиотеки
 import requests
-from sqlalchemy import create_engine, func
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import IntegrityError
 
 # Локальные импорты
 from data_bases.pro_matches.models import ProMatch, ProMatchPlayer
-from data_bases.heroes.models import Hero
 from config import (
-    PRO_DATABASE_URL, HEROES_DATABASE_URL, OPENDOTA_PRO_MATCHES_URL, OPENDOTA_MATCH_DETAILS_URL, BURST_TIME_TIMESTAMP,
+    PRO_DATABASE_URL, OPENDOTA_PRO_MATCHES_URL, OPENDOTA_MATCH_DETAILS_URL, BURST_TIME_TIMESTAMP,
     TEAM_SIZE, RADIANT_INDEX, DIRE_INDEX, PLAYER_SLOT_TEAM_BITMASK, SERIES_TYPES, VALID_LEAVER_STATUSES,
     SUPPORT_ITEM_IDS, HERO_ITEM_EXCEPTIONS, HERO_SUPPORT_SCORE_EXCEPTIONS
 )
+from utils.hero_cache import HeroCache
 from utils.console import (
     Colors,
     print_section_header,
@@ -95,11 +95,8 @@ from utils.console import (
 pro_engine = create_engine(PRO_DATABASE_URL)
 ProSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=pro_engine)
 
-heroes_engine = create_engine(HEROES_DATABASE_URL)
-HeroesSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=heroes_engine)
-
-# === ГЛОБАЛЬНЫЙ КЭШ ===
-HEROES_CACHE = {}  # {hero_id: localized_name}, загружается при старте
+# === КЭШ HEROES DATABASE ===
+hero_cache = HeroCache()
 
 # === КОНСТАНТЫ ОТЛАДКИ ===
 ENABLE_DETAILED_STATISTICS = False          # Детальная статистика обработки каждого батча
@@ -134,64 +131,6 @@ XPM_WEIGHT = 5                              # Вес XPM (инвертирова
 MAX_LEVEL_1_RATIO = 0.1                     # Максимальная доля игроков на 1 уровне (10%)
 MAX_ZERO_LASTHITS_RATIO = 0.1               # Максимальная доля игроков с 0 last_hits (10%)
 MIN_TOTAL_LAST_HITS = 30                    # Минимальное суммарное количество last_hits на матч
-
-
-def initialize_heroes_cache() -> bool:
-    """
-    Инициализирует кэш героев из базы данных для быстрого доступа.
-
-    Загружает всех героев из БД в память в формате {hero_id: localized_name}
-    для избежания множественных запросов при обработке матчей.
-
-    Returns:
-        bool: True если кэш успешно загружен, False в случае ошибки
-
-    Raises:
-        Exception: При ошибках подключения к БД или отсутствии данных
-    """
-
-    global HEROES_CACHE
-
-    heroes_session = HeroesSessionLocal()
-    try:
-        if ENABLE_DETAILED_STATISTICS:
-            print_status_message("Загрузка данных героев из базы данных...", "info", "📚")
-
-        heroes = heroes_session.query(Hero).all()
-
-        if not heroes:
-            if ENABLE_DETAILED_STATISTICS:
-                print_status_message("ВНИМАНИЕ: База данных героев пуста!", "warning", "⚠️")
-            return False
-
-        # Заполняем кэш словарем {id: localized_name}
-        for hero in heroes:
-            HEROES_CACHE[hero.id] = hero.localized_name
-
-        if ENABLE_DETAILED_STATISTICS:
-            print_status_message(f"Загружено {len(HEROES_CACHE)} героев в кэш", "success", "✅")
-        return True
-
-    except Exception as e:
-        print_status_message(f"Ошибка при загрузке героев из БД: {e}", "error", "❌")
-        return False
-
-    finally:
-        heroes_session.close()
-
-
-def get_hero_name_by_id(hero_id: int) -> str:
-    """
-    Получает название героя по его ID из кэша.
-
-    Args:
-        hero_id (int): Уникальный идентификатор героя
-
-    Returns:
-        str: Локализованное название героя или "Unknown Hero (ID: X)" если не найден
-    """
-
-    return HEROES_CACHE.get(hero_id, f"Unknown Hero (ID: {hero_id})")
 
 
 def analyze_database_state(session: Session) -> Dict[str, Any]:
@@ -963,7 +902,7 @@ def log_team_role_assignment(team_players: List[Dict]) -> None:
     """
 
     for player in team_players:
-        hero_name = get_hero_name_by_id(player['hero_id'])
+        hero_name = hero_cache.get_hero_name(player['hero_id'])
         role_color = Colors.BRIGHT_RED if player["role"] == "support" else Colors.BRIGHT_BLUE
 
         # Проверяем, использовался ли бонус SUPPORT_SCORE_EXCEPTION_WEIGHT для support_score
@@ -1206,7 +1145,7 @@ def extract_and_group_players_data(players: List[Dict]) -> Tuple[List[Dict], Lis
     return radiant_players, dire_players
 
 
-def is_dead_match(players: List[Dict], match_id: str) -> bool:
+def is_dead_match(players: List[Dict], match_id: int) -> bool:
     """
     Определяет, является ли матч "мёртвым".
 
@@ -1345,7 +1284,7 @@ def apply_secondary_filters(match_details: Dict) -> Tuple[Optional[Dict], Option
         return None, exclusion_stats
 
     # Фильтрация мёртвых матчей
-    if is_dead_match(players, match_details.get("match_id", "неизвестен")):
+    if is_dead_match(players, match_details["match_id"]):
         if ENABLE_DETAILED_STATISTICS:
             exclusion_stats['excluded_dead_match'] = 1
         return None, exclusion_stats
@@ -1954,7 +1893,7 @@ def main() -> None:
     """
 
     # Инициализация кэша героев
-    if not initialize_heroes_cache():
+    if not hero_cache.initialize():
         print_status_message("КРИТИЧЕСКАЯ ОШИБКА: Не удалось загрузить данных героев!", "error", "💥")
         print_status_message("Убедитесь, что база данных героев существует и заполнена.", "warning", "⚠️")
         return
@@ -1989,8 +1928,9 @@ def main() -> None:
         # Получения множества уже существующих в БД Match ID
         existing_match_ids = set()
         if db_state['scenario'] in [SCENARIO_UPDATE, SCENARIO_BACKFILL]:
-            existing_ids = pro_session.query(ProMatch.match_id).all()
-            existing_match_ids = {match_id[0] for match_id in existing_ids}
+            existing_match_ids = set(
+                pro_session.execute(select(ProMatch.match_id)).scalars().all()
+            )
 
         # Инициализация накопительной статистики (только если включено детальное логирование)
         accumulated_stats = None

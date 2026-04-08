@@ -562,14 +562,9 @@ class ProAnalyzer:
             .group_by(self.config.match_model.series_type) \
             .order_by(self.config.match_model.series_type).all()
 
-        # Маппинг типов серий на читаемые названия
-        series_type_names = {
-            t: f"Best of {2 * t + 1} (BO{2 * t + 1})" for t in SERIES_TYPES
-        }
-
         # Вывод распределения
         for series_type, matches in series_types:
-            type_name = series_type_names.get(series_type, f"Тип {series_type}")
+            type_name = SERIES_TYPES.get(series_type, f"Тип {series_type}")
             percentage = (matches / total_matches) * 100 if total_matches > 0 else 0
 
             print_info_line(

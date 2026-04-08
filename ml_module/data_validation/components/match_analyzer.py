@@ -58,7 +58,10 @@ from sqlalchemy.orm import Session
 
 # Локальные импорты
 from data_validation.components.database_config import DatabaseConfig
-from config import TOWERS_BITMASK, BARRACKS_BITMASK
+from config import (
+    TOWERS_BITMASK, BARRACKS_BITMASK, TOWERS_COUNT, BARRACKS_COUNT, TOWER_NAMES,
+    TOWER_BIT_POSITIONS, BARRACKS_NAMES, GAME_MODES, LOBBY_TYPES,
+)
 from utils.time_utils import format_timestamp
 from utils.console import (
     Colors,
@@ -293,10 +296,11 @@ class MatchAnalyzer:
 
         # Вывод статистики для каждого режима
         for mode, count in game_mode_stats:
+            mode_name = GAME_MODES.get(mode, f"Режим {mode}")
             percentage = (count / total_matches) * 100
 
             print_info_line(
-                f"Режим {mode}",
+                mode_name,
                 f"{count:,} ({percentage:.1f}%)",
                 "🎯",
                 Colors.BRIGHT_WHITE,
@@ -323,10 +327,11 @@ class MatchAnalyzer:
 
         # Вывод статистики для каждого типа
         for lobby, count in lobby_stats:
+            lobby_name = LOBBY_TYPES.get(lobby, f"Лобби {lobby}")
             percentage = (count / total_matches) * 100
 
             print_info_line(
-                f"Лобби {lobby}",
+                lobby_name,
                 f"{count:,} ({percentage:.1f}%)",
                 "🛠️",
                 Colors.BRIGHT_WHITE,
@@ -382,8 +387,8 @@ class MatchAnalyzer:
         Анализирует статистику разрушения игровых структур (башен и казарм).
 
         Структуры:
-        - Башни (11 на сторону): 3 линии × 3 яруса + 2 у Ancient
-        - Казармы (6 на сторону): 3 линии × 2 типа (Melee, Ranged)
+        - Башни (TOWERS_COUNT на сторону): 3 линии × 3 яруса + 2 у Ancient
+        - Казармы (BARRACKS_COUNT на сторону): 3 линии × 2 типа (Melee, Ranged)
 
         Статус структур хранится в виде битовых масок:
         бит = 1 — структура стоит, бит = 0 — уничтожена.
@@ -403,24 +408,6 @@ class MatchAnalyzer:
             self.config.match_model.barracks_status_dire
         ).all()
 
-        # Названия башен, сгруппированные по ярусам
-        tower_names = [
-            "Tier 1 Top", "Tier 1 Middle", "Tier 1 Bottom",
-            "Tier 2 Top", "Tier 2 Middle", "Tier 2 Bottom",
-            "Tier 3 Top", "Tier 3 Middle", "Tier 3 Bottom",
-            "Ancient Top", "Ancient Bottom"
-        ]
-
-        # Битовые позиции башен: API хранит биты по линиям (Top: 0,1,2; Mid: 3,4,5; Bot: 6,7,8),
-        # а мы выводим по ярусам, поэтому порядок переставлен
-        tower_bit_positions = [0, 3, 6, 1, 4, 7, 2, 5, 8, 9, 10]
-
-        barracks_names = [
-            "Top Melee", "Top Ranged",
-            "Middle Melee", "Middle Ranged",
-            "Bottom Melee", "Bottom Ranged"
-        ]
-
         # Индексы полей в результате запроса
         structure_fields = {
             "Radiant": {"towers": 0, "barracks": 2},
@@ -432,19 +419,19 @@ class MatchAnalyzer:
         print_subsection_header("Статистика уничтожения башен", "🗼", Colors.BRIGHT_BLUE)
 
         # Подсчёт уничтожений каждой башни для обеих сторон
-        tower_destroyed = {team: [0] * len(tower_names) for team in structure_fields}
+        tower_destroyed = {team: [0] * TOWERS_COUNT for team in structure_fields}
 
         for match in matches_data:
             for team, fields in structure_fields.items():
                 status = match[fields["towers"]]
-                for i, bit_pos in enumerate(tower_bit_positions):
+                for i, bit_pos in enumerate(TOWER_BIT_POSITIONS):
                     if status & (1 << bit_pos) == 0:
                         tower_destroyed[team][i] += 1
 
         for idx, team in enumerate(structure_fields):
             prefix = "\n" if idx > 0 else ""
             print(f"{prefix}{team_emojis[team]} {Colors.BOLD}{team}:{Colors.RESET}")
-            for i, name in enumerate(tower_names):
+            for i, name in enumerate(TOWER_NAMES):
                 count = tower_destroyed[team][i]
                 pct = (count / total_matches) * 100
                 color = Colors.BRIGHT_RED if pct > 50 else Colors.BRIGHT_GREEN
@@ -457,19 +444,19 @@ class MatchAnalyzer:
         # === АНАЛИЗ КАЗАРМ ===
         print_subsection_header("Статистика уничтожения казарм", "🏰", Colors.BRIGHT_GREEN)
 
-        barracks_destroyed = {team: [0] * len(barracks_names) for team in structure_fields}
+        barracks_destroyed = {team: [0] * BARRACKS_COUNT for team in structure_fields}
 
         for match in matches_data:
             for team, fields in structure_fields.items():
                 status = match[fields["barracks"]]
-                for bit_pos in range(len(barracks_names)):
+                for bit_pos in range(BARRACKS_COUNT):
                     if status & (1 << bit_pos) == 0:
                         barracks_destroyed[team][bit_pos] += 1
 
         for idx, team in enumerate(structure_fields):
             prefix = "\n" if idx > 0 else ""
             print(f"{prefix}{team_emojis[team]} {Colors.BOLD}{team}:{Colors.RESET}")
-            for i, name in enumerate(barracks_names):
+            for i, name in enumerate(BARRACKS_NAMES):
                 count = barracks_destroyed[team][i]
                 pct = (count / total_matches) * 100
                 color = Colors.BRIGHT_RED if pct > 50 else Colors.BRIGHT_GREEN
@@ -500,10 +487,10 @@ class MatchAnalyzer:
         try:
             # (индекс_поля, битовая_маска, максимум_структур, тип)
             structure_config = [
-                (0, TOWERS_BITMASK, 11, "башен"),
-                (2, BARRACKS_BITMASK, 6, "казарм"),
-                (1, TOWERS_BITMASK, 11, "башен"),
-                (3, BARRACKS_BITMASK, 6, "казарм"),
+                (0, TOWERS_BITMASK, TOWERS_COUNT, "башен"),
+                (2, BARRACKS_BITMASK, BARRACKS_COUNT, "казарм"),
+                (1, TOWERS_BITMASK, TOWERS_COUNT, "башен"),
+                (3, BARRACKS_BITMASK, BARRACKS_COUNT, "казарм"),
             ]
 
             # Соответствие: индекс поля → сторона
