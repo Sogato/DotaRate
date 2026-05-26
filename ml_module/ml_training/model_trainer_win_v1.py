@@ -12,7 +12,7 @@ Win v1 представляет собой архитектуру, основа�
 Ключевые особенности:
 - Вход: плотные индексы героев (5 Radiant + 5 Dire)
 - Embedding слой: общий для обеих команд, преобразует индексы в векторы
-- Sum Pooling: агрегация через GlobalAveragePooling × TEAM_SIZE (суммирование векторов команды)
+- Average Pooling: агрегация через GlobalAveragePooling1D (усреднение векторов команды)
 - Представление команды: единый вектор без учёта взаимодействий между героями
 - MLP: последовательность Dense → BatchNorm → ReLU → Dropout слоёв
 - Выходной слой: sigmoid активация для вероятности победы Radiant
@@ -48,7 +48,6 @@ from keras.layers import (
     Dropout,
     Embedding,
     GlobalAveragePooling1D,
-    Rescaling,
 )
 from keras.metrics import AUC, Precision, Recall
 from keras.optimizers import Adam
@@ -86,7 +85,7 @@ N_FOLDS = 5                         # Количество фолдов для �
 # EarlyStopping - остановка обучения при отсутствии улучшений
 EARLY_STOPPING_PATIENCE = 25        # Количество эпох без улучшения до остановки
 EARLY_STOPPING_MIN_DELTA = 0.0001   # Минимальное изменение для учета как улучшение
-EARLY_STOPPING_MONITOR = 'val_auc'  # Метрика для отслеживания
+EARLY_STOPPING_MONITOR = 'val_loss' # Метрика для отслеживания
 EARLY_STOPPING_MODE = 'max'         # Режим отслеживания
 
 # ReduceLROnPlateau - снижение learning rate при плато
@@ -262,15 +261,18 @@ class ModelTrainerWinV1:
         Архитектура:
         1. Входы: radiant_heroes [5] + dire_heroes [5] (int32 индексы)
         2. Shared Embedding [num_heroes → embedding_dim] с L2 регуляризацией
-        3. Sum Pooling: GlobalAveragePooling1D × TEAM_SIZE для каждой команды
+        3. Average Pooling: GlobalAveragePooling1D для каждой команды
         4. Concatenate → объединение представлений команд [2 × embedding_dim]
         5. MLP: Dense → BatchNorm → ReLU → Dropout (повторяется N раз)
         6. Выходной слой: Dense(1, sigmoid) → вероятность победы Radiant
 
         Особенности реализации:
-        - Sum pooling выбран для создания permutation-invariant представления команды
+        - Average pooling создаёт permutation-invariant представление команды
           (порядок героев не влияет на результат). Это простая агрегация, которая
-          суммирует векторы всех героев команды без учета их взаимодействий.
+          усредняет векторы всех героев команды без учёта их взаимодействий.
+          Выбор между средним и суммой здесь не имеет значения: они отличаются
+          лишь постоянным множителем, который поглощается весами следующего
+          слоя Dense, поэтому отдельное масштабирование не применяется.
         - Shared embedding: один embedding слой для обеих команд, что означает
           одинаковое представление героя вне зависимости от стороны (Radiant/Dire).
 
@@ -298,13 +300,9 @@ class ModelTrainerWinV1:
         radiant_emb = hero_embedding(radiant_input)  # [batch, 5, emb_dim]
         dire_emb = hero_embedding(dire_input)
 
-        # Sum pooling через GlobalAveragePooling × TEAM_SIZE
-        radiant_mean = GlobalAveragePooling1D(name='radiant_avg')(radiant_emb)
-        dire_mean = GlobalAveragePooling1D(name='dire_avg')(dire_emb)
-
-        # Rescaling (вместо Lambda для безопасной сериализации)
-        radiant_pooled = Rescaling(scale=TEAM_SIZE, name='radiant_sum')(radiant_mean)
-        dire_pooled = Rescaling(scale=TEAM_SIZE, name='dire_sum')(dire_mean)
+        # Average pooling: агрегация 5 героев команды в один вектор.
+        radiant_pooled = GlobalAveragePooling1D(name='radiant_avg')(radiant_emb)
+        dire_pooled = GlobalAveragePooling1D(name='dire_avg')(dire_emb)
 
         # Конкатенация векторов команд
         combined = Concatenate(name='concatenate')([radiant_pooled, dire_pooled])
@@ -435,9 +433,9 @@ class ModelTrainerWinV1:
             best_val_auc, best_val_acc, epochs_trained, fold_training_time
         )
 
-        # Очистка памяти
-        keras_clear_session()
+        # Очистка памяти: сначала удаляем ссылку на модель, затем очищаем сессию Keras.
         del model
+        keras_clear_session()
 
         return {
             'fold': fold_num,

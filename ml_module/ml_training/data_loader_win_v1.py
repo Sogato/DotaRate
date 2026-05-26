@@ -13,18 +13,17 @@ HDF5 файлов, базы данных и одиночных матчей. П�
 Источники данных и их предобработка:
 1. HDF5 файлы:
    - Данные уже содержат плотные индексы
-   - Применяется сортировка (опционально)
    - Проверяется валидность данных (непустой датасет)
    - Возвращает: (features_dict, labels)
 
 2. База данных (множество матчей):
    - Данные содержат исходные hero_id
-   - Применяется: hero_id → плотные индексы → сортировка (опционально)
+   - Применяется: hero_id → плотные индексы
    - Возвращает: (features_dict, labels)
 
 3. Одиночный матч:
    - Данные содержат исходные hero_id
-   - Применяется: hero_id → плотные индексы → сортировка (опционально)
+   - Применяется: hero_id → плотные индексы
    - Возвращает: (features_dict) без labels
 
 Все методы возвращают единый формат Dict для признаков:
@@ -48,9 +47,6 @@ from utils.console import (
     print_subsection_header,
 )
 
-# === КОНСТАНТЫ LOADER WIN V1 ===
-SORT_TEAM_HEROES = True  # Флаг сортировки составов команд
-
 
 class DataLoaderWinV1:
     """
@@ -61,8 +57,13 @@ class DataLoaderWinV1:
 
     Этапы предобработки:
     1. Преобразование hero_id в плотные индексы (если требуется)
-    2. Сортировка индексов героев (если SORT_TEAM_HEROES=True)
-    3. Формирование numpy массивов в Dict формате
+    2. Формирование numpy массивов в Dict формате
+
+    Примечание о порядке героев:
+    Состав команды агрегируется в модели через permutation-invariant pooling
+    (average pooling по 5 героям), поэтому порядок индексов внутри команды
+    не влияет на результат. Сортировка составов не выполняется намеренно —
+    она была бы лишней вычислительной работой без эффекта на обучение.
 
     Attributes:
         hero_mapper (HeroMapper): Маппер для преобразования hero_id в плотные индексы
@@ -79,7 +80,7 @@ class DataLoaderWinV1:
 
     def _process_team_heroes(self, heroes: Union[List[int], np.ndarray], from_ids: bool = True) -> np.ndarray:
         """
-        Преобразует состав команды в плотные индексы с опциональной сортировкой.
+        Преобразует состав команды в плотные индексы.
 
         Args:
             heroes (Union[List[int], np.ndarray]): Состав команды (5 героев)
@@ -88,7 +89,7 @@ class DataLoaderWinV1:
                 False - данные уже плотные индексы
 
         Returns:
-            np.ndarray: Массив индексов (отсортированный если SORT_TEAM_HEROES=True), shape (5,), dtype int32
+            np.ndarray: Массив индексов, shape (5,), dtype int32
 
         Raises:
             ValueError: Если hero_id не найден в маппере
@@ -105,13 +106,10 @@ class DataLoaderWinV1:
         else:
             indices = heroes
 
-        # Опциональная сортировка
-        if SORT_TEAM_HEROES:
-            indices = sorted(indices)
-
         return np.array(indices, dtype=np.int32)
 
-    def load_data_from_hdf5(self, hdf5_path: str) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
+    @staticmethod
+    def load_data_from_hdf5(hdf5_path: str) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
         """
         Загружает данные из HDF5 файла.
 
@@ -151,11 +149,6 @@ class DataLoaderWinV1:
         # Проверка на пустой датасет
         if total_matches == 0:
             raise ValueError("HDF5 файл не содержит данных для обучения")
-
-        # Обработка составов (сортировка если включена)
-        for match_idx in range(total_matches):
-            radiant_all[match_idx] = self._process_team_heroes(radiant_all[match_idx], from_ids=False)
-            dire_all[match_idx] = self._process_team_heroes(dire_all[match_idx], from_ids=False)
 
         # Статистика
         radiant_wins = np.sum(labels_all)
