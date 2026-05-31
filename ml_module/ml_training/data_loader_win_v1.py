@@ -16,9 +16,9 @@ HDF5 файлов, базы данных и одиночных матчей. П�
    - Проверяется валидность данных (непустой датасет)
    - Возвращает: (features_dict, labels)
 
-2. База данных (множество матчей):
-   - Данные содержат исходные hero_id
-   - Применяется: hero_id → плотные индексы
+2. База данных:
+   - Запрос матчей из БД с фильтром по лигам и лимитом
+   - Валидация состава и преобразование hero_id → плотные индексы
    - Возвращает: (features_dict, labels)
 
 3. Одиночный матч:
@@ -32,20 +32,33 @@ HDF5 файлов, базы данных и одиночных матчей. П�
 
 # Стандартные библиотеки
 from pathlib import Path
-from typing import Dict, List, Union, Tuple, Set
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 # Сторонние библиотеки
 import h5py
 import numpy as np
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 # Локальные импорты
 from utils.hero_mapper import HeroMapper
-from config import EXCLUDED_HERO_IDS
+from data_bases.pro_matches.models import ProMatch, ProMatchPlayer
+from config import (
+    DIRE_INDEX,
+    EXCLUDED_HERO_IDS,
+    PRO_DATABASE_URL,
+    RADIANT_INDEX,
+    TEAM_SIZE,
+)
 from utils.console import (
     Colors,
     print_info_line,
     print_subsection_header,
 )
+
+# === ПОДКЛЮЧЕНИЕ К БД ПРОФЕССИОНАЛЬНЫХ МАТЧЕЙ ===
+engine = create_engine(PRO_DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 class DataLoaderWinV1:
@@ -113,7 +126,7 @@ class DataLoaderWinV1:
         """
         Загружает данные из HDF5 файла.
 
-        HDF5 файлы предполагает содержание предобработанных плотных индексов.
+        Предполагается, что HDF5 файл содержит предобработанные плотные индексы
 
         Args:
             hdf5_path (str): Путь к HDF5 файлу с данными
@@ -126,7 +139,7 @@ class DataLoaderWinV1:
         Raises:
             FileNotFoundError: Если HDF5 файл не найден
             OSError: Если не удается получить доступ к файлу
-            ValueError: Если HDF5 файл не содержит данных для обучения
+            ValueError: Если HDF5 файл не содержит данных
         """
         print_subsection_header("Загрузка данных из HDF5", "📂", Colors.BLUE_2)
         print_info_line("Полный путь", hdf5_path, "📂",
@@ -148,10 +161,10 @@ class DataLoaderWinV1:
 
         # Проверка на пустой датасет
         if total_matches == 0:
-            raise ValueError("HDF5 файл не содержит данных для обучения")
+            raise ValueError("HDF5 файл не содержит данных")
 
         # Статистика
-        radiant_wins = np.sum(labels_all)
+        radiant_wins = float(np.sum(labels_all))
         dire_wins = total_matches - radiant_wins
         radiant_win_rate = (radiant_wins / total_matches) * 100
 
@@ -161,9 +174,9 @@ class DataLoaderWinV1:
                         Colors.BLUE_3, Colors.GOLD_3)
         print_info_line("Побед Dire", f"{int(dire_wins):,} ({100 - radiant_win_rate:.1f}%)", "🌑",
                         Colors.BLUE_3, Colors.BRIGHT_PURPLE)
-        print_info_line("Форма Radiant", f"{radiant_all.shape}", "📐",
+        print_info_line("Размерность Radiant", f"{radiant_all.shape}", "📐",
                         Colors.BLUE_3, Colors.BLUE_4)
-        print_info_line("Форма Dire", f"{dire_all.shape}", "📐",
+        print_info_line("Размерность Dire", f"{dire_all.shape}", "📐",
                         Colors.BLUE_3, Colors.BLUE_4)
 
         # Формирование Dict формата
@@ -174,57 +187,133 @@ class DataLoaderWinV1:
 
         return features, labels_all
 
-    def get_data_from_db(self, matches_data: List[Dict]) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
+    def load_data_from_db(self,
+                          limit: Optional[int] = None,
+                          league_ids: Optional[Set[int]] = None) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
         """
-        Преобразует множество матчей из базы данных в numpy массивы.
+        Загружает данные из БД профессиональных матчей и приводит к Dict формату.
 
-        Выполняет полную предобработку: hero_id → плотные индексы → сортировка (опционально).
+        Единый шаг: доступ к источнику (запрос к ProMatch/ProMatchPlayer, валидация
+        состава) и конвертация hero_id → плотные индексы выполняются в одном цикле,
+        без промежуточного списка словарей. Зеркален load_data_from_hdf5: считает и
+        выводит статистику по фактически загруженным матчам.
 
         Args:
-            matches_data (List[Dict]): Список матчей, каждый содержит:
-                - 'radiant_heroes': список hero_id (5 элементов)
-                - 'dire_heroes': список hero_id (5 элементов)
-                - 'radiant_win': булев результат
+            limit (Optional[int]): Максимум матчей в выборке (None = все).
+                Из-за отсева невалидных матчей загружено может быть чуть меньше.
+            league_ids (Optional[Set[int]]): Фильтр по лигам (пустое/None = все).
 
         Returns:
             Tuple[Dict[str, np.ndarray], np.ndarray]:
                 - features: {'radiant_heroes': (N, 5), 'dire_heroes': (N, 5)}, dtype int32
-                - labels: (N,), dtype float32
+                - labels: shape (N,), dtype float32
 
         Raises:
-            ValueError: При пустых данных
+            ValueError: Если из БД не получено ни одного валидного матча.
+
+        Note:
+            Матч пропускается со счётчиком, если в нём не 10 игроков, состав не
+            бьётся по TEAM_SIZE на команду, либо встречается hero_id вне маппера
+            (исключённый/новый герой). Ошибки БД (SQLAlchemyError) пробрасываются
+            наверх — их ловит общий обработчик в test_ensemble, как и для HDF5.
         """
-        if not matches_data:
-            raise ValueError("Нет матчей для обработки")
+        print_subsection_header("Загрузка данных из БД", "📂", Colors.BLUE_2)
 
-        radiant_features = []
-        dire_features = []
-        labels = []
+        session = SessionLocal()
+        try:
+            # Запрос к матчам с опциональным фильтром по лигам
+            query = session.query(ProMatch)
+            if league_ids:
+                query = query.filter(ProMatch.leagueid.in_(league_ids))
+                leagues_str = ", ".join(map(str, sorted(league_ids)))
+                print_info_line("Фильтр по лигам", f"ID [{leagues_str}]", "🏆",
+                                Colors.BLUE_3, Colors.BRIGHT_PURPLE)
+            if limit:
+                query = query.limit(limit)
 
-        for match in matches_data:
-            radiant_indices = self._process_team_heroes(match['radiant_heroes'], from_ids=True)
-            dire_indices = self._process_team_heroes(match['dire_heroes'], from_ids=True)
+            matches = query.all()
+            print_info_line("Найдено матчей в БД", f"{len(matches):,}", "📊",
+                            Colors.BLUE_3, Colors.BRIGHT_CYAN)
 
-            radiant_features.append(radiant_indices)
-            dire_features.append(dire_indices)
-            labels.append(float(match['radiant_win']))
+            # Накопители сразу в виде индексов — без промежуточного List[Dict]
+            radiant_features = []
+            dire_features = []
+            labels = []
+            skipped_count = 0
 
-        print_info_line("Подготовлено матчей", f"{len(labels)}", "🎮",
-                        Colors.BLUE_3, Colors.BRIGHT_GREEN)
+            for match in matches:
+                players = session.query(ProMatchPlayer).filter(
+                    ProMatchPlayer.match_id == match.match_id
+                ).all()
 
+                # Отсев неполного состава
+                if len(players) != 10:
+                    skipped_count += 1
+                    continue
+
+                radiant_heroes = [p.hero_id for p in players if p.team_number == RADIANT_INDEX]
+                dire_heroes = [p.hero_id for p in players if p.team_number == DIRE_INDEX]
+
+                # Отсев некорректного распределения по командам
+                if len(radiant_heroes) != TEAM_SIZE or len(dire_heroes) != TEAM_SIZE:
+                    skipped_count += 1
+                    continue
+
+                # hero_id → плотные индексы; матч с неизвестным героем пропускаем,
+                # а не роняем весь прогон (раньше это бросало ValueError наружу)
+                try:
+                    radiant_indices = self._process_team_heroes(radiant_heroes, from_ids=True)
+                    dire_indices = self._process_team_heroes(dire_heroes, from_ids=True)
+                except ValueError:
+                    skipped_count += 1
+                    continue
+
+                radiant_features.append(radiant_indices)
+                dire_features.append(dire_indices)
+                labels.append(float(match.radiant_win))
+        finally:
+            session.close()
+
+        total_matches = len(labels)
+        if total_matches == 0:
+            raise ValueError("БД не вернула ни одного валидного матча")
+
+        radiant_all = np.array(radiant_features, dtype=np.int32)
+        dire_all = np.array(dire_features, dtype=np.int32)
+        labels_all = np.array(labels, dtype=np.float32)
+
+        # Статистика по фактически загруженным матчам (как в load_data_from_hdf5)
+        radiant_wins = np.sum(labels_all)
+        dire_wins = total_matches - radiant_wins
+        radiant_win_rate = (radiant_wins / total_matches) * 100
+
+        if skipped_count > 0:
+            print_info_line("Пропущено матчей", f"{skipped_count:,}", "⚠️",
+                            Colors.BLUE_3, Colors.BRIGHT_ORANGE)
+        print_info_line("Всего матчей", f"{total_matches:,}", "🎮",
+                        Colors.BLUE_3, Colors.BRIGHT_WHITE)
+        print_info_line("Побед Radiant", f"{int(radiant_wins):,} ({radiant_win_rate:.1f}%)", "🌞",
+                        Colors.BLUE_3, Colors.GOLD_3)
+        print_info_line("Побед Dire", f"{int(dire_wins):,} ({100 - radiant_win_rate:.1f}%)", "🌑",
+                        Colors.BLUE_3, Colors.BRIGHT_PURPLE)
+        print_info_line("Размерность Radiant", f"{radiant_all.shape}", "📐",
+                        Colors.BLUE_3, Colors.BLUE_4)
+        print_info_line("Размерность Dire", f"{dire_all.shape}", "📐",
+                        Colors.BLUE_3, Colors.BLUE_4)
+
+        # Формирование Dict формата
         features = {
-            'radiant_heroes': np.array(radiant_features, dtype=np.int32),
-            'dire_heroes': np.array(dire_features, dtype=np.int32)
+            'radiant_heroes': radiant_all,
+            'dire_heroes': dire_all
         }
-        labels_array = np.array(labels, dtype=np.float32)
 
-        return features, labels_array
+        return features, labels_all
 
     def get_single_match_input(self, radiant_hero_ids: List[int], dire_hero_ids: List[int]) -> Dict[str, np.ndarray]:
         """
         Преобразует составы одного матча в numpy массивы.
 
-        Выполняет полную предобработку: hero_id → плотные индексы → сортировка (опционально).
+        Выполняет полную предобработку: hero_id → плотные индексы.
 
         Args:
             radiant_hero_ids (List[int]): 5 hero_id команды Radiant

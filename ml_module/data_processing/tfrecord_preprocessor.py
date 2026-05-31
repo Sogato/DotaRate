@@ -853,9 +853,9 @@ def main():
 
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(current_dir)
-    base_output_path = os.path.join(project_root, 'data', f'{TFRECORD_FILE_NAME}_{DOTA_VERSION}.tfrecord')
+    base_output_path = os.path.join(project_root, 'datasets', f'{TFRECORD_FILE_NAME}_{DOTA_VERSION}.tfrecord')
 
-    print_info_line("Директория данных", os.path.join(project_root, 'data'), "📂", value_color=Colors.BRIGHT_CYAN)
+    print_info_line("Директория данных", os.path.join(project_root, 'datasets'), "📂", value_color=Colors.BRIGHT_CYAN)
     print_info_line("Базовое имя файлов", os.path.basename(base_output_path), "📄", value_color=Colors.BRIGHT_GOLD)
 
     try:

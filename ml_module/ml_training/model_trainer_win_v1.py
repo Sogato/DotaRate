@@ -70,10 +70,10 @@ HDF5_FILENAME = "HDF5_dataset_{version}_main.h5"    # Имя HDF5 файла с 
 MODEL_FILENAME = "model_win_v1_{version}.keras"     # Имя сохраняемой модели
 
 # === КОНСТАНТЫ АРХИТЕКТУРЫ ===
-DEFAULT_HIDDEN_UNITS = [512, 256]   # Размеры скрытых Dense слоев
-DEFAULT_EMBEDDING_DIM = 128         # Размерность embedding векторов героев
-DEFAULT_DROPOUT_RATE = 0.15         # Коэффициент dropout для регуляризации
-DEFAULT_L2_REG = 0.00015            # Коэффициент L2 регуляризации весов
+DEFAULT_HIDDEN_UNITS = [256, 128]   # Размеры скрытых Dense слоев
+DEFAULT_EMBEDDING_DIM = 32          # Размерность embedding векторов героев
+DEFAULT_DROPOUT_RATE = 0.2          # Коэффициент dropout для регуляризации
+DEFAULT_L2_REG = 0.001              # Коэффициент L2 регуляризации весов
 
 # === КОНСТАНТЫ ОБУЧЕНИЯ ===
 DEFAULT_EPOCHS = 1000               # Максимальное количество эпох обучения
@@ -86,7 +86,7 @@ N_FOLDS = 5                         # Количество фолдов для �
 EARLY_STOPPING_PATIENCE = 25        # Количество эпох без улучшения до остановки
 EARLY_STOPPING_MIN_DELTA = 0.0001   # Минимальное изменение для учета как улучшение
 EARLY_STOPPING_MONITOR = 'val_loss' # Метрика для отслеживания
-EARLY_STOPPING_MODE = 'max'         # Режим отслеживания
+EARLY_STOPPING_MODE = 'min'         # Режим отслеживания
 
 # ReduceLROnPlateau - снижение learning rate при плато
 REDUCE_LR_PATIENCE = 5          # Количество эпох без улучшения до снижения LR
@@ -421,8 +421,8 @@ class ModelTrainerWinV1:
         model.save(fold_path)
 
         # Извлечение метрик
-        best_val_auc = max(history.history['val_auc'])
-        best_val_acc = max(history.history['val_accuracy'])
+        best_val_auc = float(max(history.history['val_auc']))
+        best_val_acc = float(max(history.history['val_accuracy']))
         epochs_trained = len(history.history['loss'])
 
         fold_training_time = time.time() - fold_start_time
@@ -518,11 +518,11 @@ class ModelTrainerWinV1:
         print_section_header("ФИНАЛЬНЫЕ РЕЗУЛЬТАТЫ АНСАМБЛЯ", "🏆", color=Colors.GOLD_1)
 
         # Расчет средних метрик
-        avg_val_auc = np.mean([fold_data['best_val_auc'] for fold_data in fold_results])
-        avg_val_acc = np.mean([fold_data['best_val_accuracy'] for fold_data in fold_results])
-        std_val_auc = np.std([fold_data['best_val_auc'] for fold_data in fold_results])
-        std_val_acc = np.std([fold_data['best_val_accuracy'] for fold_data in fold_results])
-        avg_training_time = np.mean([fold_data['training_time'] for fold_data in fold_results])
+        avg_val_auc = float(np.mean([fold_data['best_val_auc'] for fold_data in fold_results]))
+        avg_val_acc = float(np.mean([fold_data['best_val_accuracy'] for fold_data in fold_results]))
+        std_val_auc = float(np.std([fold_data['best_val_auc'] for fold_data in fold_results]))
+        std_val_acc = float(np.std([fold_data['best_val_accuracy'] for fold_data in fold_results]))
+        avg_training_time = float(np.mean([fold_data['training_time'] for fold_data in fold_results]))
 
         print_subsection_header("Средние метрики по фолдам", "🧪", Colors.GOLD_2)
         print_info_line("Средний val AUC", f"{avg_val_auc:.4f} ± {std_val_auc:.4f}", "📏",
@@ -626,12 +626,14 @@ def validate_paths(data_file: str, output_dir: Path) -> bool:
     return True
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Точка входа: запуск обучения."""
+
     # Стартовый заголовок
     print_startup_header()
 
     # Определение путей
-    data_dir = Path(__file__).parent.parent / "data"
+    data_dir = Path(__file__).parent.parent / "datasets"
     models_dir = Path(__file__).parent.parent / "models"
 
     hdf5_file_path = str(data_dir / HDF5_FILENAME.format(version=DOTA_VERSION))
@@ -645,3 +647,6 @@ if __name__ == "__main__":
     # Создание тренера и запуск обучения
     trainer = ModelTrainerWinV1(epochs=DEFAULT_EPOCHS)
     trainer.train(data_file_path=hdf5_file_path, base_model_path=model_output_path)
+
+if __name__ == "__main__":
+    main()

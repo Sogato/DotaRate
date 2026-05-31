@@ -779,10 +779,10 @@ def main():
     # === КОНФИГУРАЦИЯ ПУТЕЙ И ОКРУЖЕНИЯ ===
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(current_dir)
-    base_output_path = os.path.join(project_root, 'data', f'{HDF5_FILE_NAME}_{DOTA_VERSION}.h5')
+    base_output_path = os.path.join(project_root, 'datasets', f'{HDF5_FILE_NAME}_{DOTA_VERSION}.h5')
 
     print_subsection_header("Конфигурация окружения", "🔧", Colors.BRIGHT_CYAN)
-    print_info_line("Директория данных", os.path.join(project_root, 'data'), "📂", value_color=Colors.BRIGHT_CYAN)
+    print_info_line("Директория данных", os.path.join(project_root, 'datasets'), "📂", value_color=Colors.BRIGHT_CYAN)
 
     try:
         # === ИНИЦИАЛИЗАЦИЯ ПРЕПРОЦЕССОРА ===
