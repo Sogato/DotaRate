@@ -450,15 +450,12 @@ class ModelTesterWinV1:
             'false_negatives': int(fn)
         }
 
-    def _analyze_confidence_accuracy(self,
-                                     predictions: np.ndarray,
-                                     true_labels: np.ndarray,
-                                     confidence_thresholds: Optional[List[float]] = None) -> Dict:
+    def _analyze_confidence_accuracy(self, predictions: np.ndarray, true_labels: np.ndarray) -> Dict:
         """
         Анализирует точность предсказаний ансамбля в разрезе уровней уверенности.
 
-        Для каждого порога уверенности выделяет три группы предсказаний и считает
-        их точность и долю от общего числа:
+        Пороги берутся из self.confidence_thresholds. Для каждого порога выделяет
+        три группы предсказаний и считает их точность и долю от общего числа:
         1. Уверенные за Radiant: вероятность >= threshold
         2. Уверенные за Dire: вероятность <= (1 - threshold)
         3. Все уверенные предсказания: объединение групп 1 и 2
@@ -469,20 +466,14 @@ class ModelTesterWinV1:
         Args:
             predictions (np.ndarray): Вероятности победы Radiant (диапазон 0-1)
             true_labels (np.ndarray): Истинные метки (1 = Radiant, 0 = Dire)
-            confidence_thresholds (Optional[List[float]]): Пороги уверенности
-                (по умолчанию используется self.confidence_thresholds)
 
         Returns:
             Dict: Анализ по каждому порогу с ключами вида 'confidence_{N}', где для
                 каждой группы указаны count, accuracy и percentage_of_total.
         """
 
-        # Подстановка порогов по умолчанию из конфигурации тестера
-        if confidence_thresholds is None:
-            confidence_thresholds = self.confidence_thresholds
-
         analysis = {}
-        for threshold in confidence_thresholds:
+        for threshold in self.confidence_thresholds:
             # Группа уверенных предсказаний за Radiant
             high_radiant_mask = predictions >= threshold
             high_radiant_count = np.sum(high_radiant_mask)

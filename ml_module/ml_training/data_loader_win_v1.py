@@ -32,6 +32,7 @@ HDF5 файлов, базы данных и одиночных матчей. П�
 
 # Стандартные библиотеки
 from pathlib import Path
+from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple, Union
 
 # Сторонние библиотеки
@@ -59,6 +60,9 @@ from utils.console import (
 # === ПОДКЛЮЧЕНИЕ К БД ПРОФЕССИОНАЛЬНЫХ МАТЧЕЙ ===
 engine = create_engine(PRO_DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# === КОНСТАНТЫ ЗАГРУЗКИ ИЗ БД ===
+DB_PLAYERS_FETCH_CHUNK_SIZE = 1000  # Размер чанка match_id для батчевого запроса игроков
 
 
 class DataLoaderWinV1:
@@ -89,6 +93,7 @@ class DataLoaderWinV1:
         Args:
             excluded_hero_ids (Set[int], optional): Множество ID героев для исключения
         """
+
         self.hero_mapper = HeroMapper(excluded_hero_ids=excluded_hero_ids)
 
     def _process_team_heroes(self, heroes: Union[List[int], np.ndarray], from_ids: bool = True) -> np.ndarray:
@@ -107,6 +112,7 @@ class DataLoaderWinV1:
         Raises:
             ValueError: Если hero_id не найден в маппере
         """
+
         if isinstance(heroes, np.ndarray):
             heroes = heroes.tolist()
 
@@ -141,6 +147,7 @@ class DataLoaderWinV1:
             OSError: Если не удается получить доступ к файлу
             ValueError: Если HDF5 файл не содержит данных
         """
+
         print_subsection_header("Загрузка данных из HDF5", "📂", Colors.BLUE_2)
         print_info_line("Полный путь", hdf5_path, "📂",
                         Colors.BLUE_3, Colors.AMBER_4)
@@ -187,16 +194,51 @@ class DataLoaderWinV1:
 
         return features, labels_all
 
+    @staticmethod
+    def _fetch_players_by_match(session, match_ids: List[int]) -> Dict[int, List[ProMatchPlayer]]:
+        """
+        Батчево загружает игроков для всех матчей одним проходом.
+
+        Все match_id режутся на чанки и выбираются через IN (...), после чего игроки
+        группируются по match_id в словарь.
+
+        Чанкование нужно, чтобы не упереться в лимит числа параметров запроса у
+        драйвера БД при IN на десятки тысяч ID.
+
+        Args:
+            session: Активная сессия SQLAlchemy
+            match_ids (List[int]): ID матчей, для которых нужны игроки
+
+        Returns:
+            Dict[int, List[ProMatchPlayer]]: Игроки, сгруппированные по match_id.
+                Матчи без игроков в словарь не попадают (вызывающий код трактует
+                отсутствие как неполный состав и пропускает матч).
+        """
+
+        players_by_match: Dict[int, List[ProMatchPlayer]] = defaultdict(list)
+
+        # Поэтапная выборка чанками match_id, чтобы IN (...) не разрастался безгранично
+        for chunk_start in range(0, len(match_ids), DB_PLAYERS_FETCH_CHUNK_SIZE):
+            chunk_ids = match_ids[chunk_start:chunk_start + DB_PLAYERS_FETCH_CHUNK_SIZE]
+            chunk_players = session.query(ProMatchPlayer).filter(
+                ProMatchPlayer.match_id.in_(chunk_ids)
+            ).all()
+            for player in chunk_players:
+                players_by_match[player.match_id].append(player)
+
+        return players_by_match
+
     def load_data_from_db(self,
                           limit: Optional[int] = None,
                           league_ids: Optional[Set[int]] = None) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
         """
         Загружает данные из БД профессиональных матчей и приводит к Dict формату.
 
-        Единый шаг: доступ к источнику (запрос к ProMatch/ProMatchPlayer, валидация
-        состава) и конвертация hero_id → плотные индексы выполняются в одном цикле,
-        без промежуточного списка словарей. Зеркален load_data_from_hdf5: считает и
-        выводит статистику по фактически загруженным матчам.
+        Сначала выбираются сами матчи (с опциональным фильтром по лигам и лимитом),
+        затем игроки всех матчей загружаются единым батчевым запросом через
+        _fetch_players_by_match, и наконец валидный состав каждого матча конвертируется
+        hero_id → плотные индексы. Зеркален load_data_from_hdf5:
+        считает и выводит статистику по фактически загруженным матчам.
 
         Args:
             limit (Optional[int]): Максимум матчей в выборке (None = все).
@@ -215,8 +257,9 @@ class DataLoaderWinV1:
             Матч пропускается со счётчиком, если в нём не 10 игроков, состав не
             бьётся по TEAM_SIZE на команду, либо встречается hero_id вне маппера
             (исключённый/новый герой). Ошибки БД (SQLAlchemyError) пробрасываются
-            наверх — их ловит общий обработчик в test_ensemble, как и для HDF5.
+            наверх — их ловит общий обработчик в test, как и для HDF5.
         """
+
         print_subsection_header("Загрузка данных из БД", "📂", Colors.BLUE_2)
 
         session = SessionLocal()
@@ -235,6 +278,10 @@ class DataLoaderWinV1:
             print_info_line("Найдено матчей в БД", f"{len(matches):,}", "📊",
                             Colors.BLUE_3, Colors.BRIGHT_CYAN)
 
+            # Батчевая загрузка игроков всех матчей разом
+            match_ids = [match.match_id for match in matches]
+            players_by_match = self._fetch_players_by_match(session, match_ids)
+
             # Накопители сразу в виде индексов — без промежуточного List[Dict]
             radiant_features = []
             dire_features = []
@@ -242,9 +289,7 @@ class DataLoaderWinV1:
             skipped_count = 0
 
             for match in matches:
-                players = session.query(ProMatchPlayer).filter(
-                    ProMatchPlayer.match_id == match.match_id
-                ).all()
+                players = players_by_match.get(match.match_id, [])
 
                 # Отсев неполного состава
                 if len(players) != 10:
@@ -322,6 +367,7 @@ class DataLoaderWinV1:
         Returns:
             Dict[str, np.ndarray]: {'radiant_heroes': (1, 5), 'dire_heroes': (1, 5)}, dtype int32
         """
+
         radiant_indices = self._process_team_heroes(radiant_hero_ids, from_ids=True)
         dire_indices = self._process_team_heroes(dire_hero_ids, from_ids=True)
 

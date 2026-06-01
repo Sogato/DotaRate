@@ -29,6 +29,7 @@
 Технические особенности:
 - Использует keyset пагинацию для эффективной обработки больших датасетов
 - Применяет reservoir sampling для равномерного распределения тестовой выборки
+- Разбиение train/test фиксируется сидом RANDOM_SEED
 - Обеспечивает детерминированную сортировку героев внутри команд
 - Поддерживает исключение героев через конфигурируемый список
 - Создает два отдельных TFRecord файла для различных сценариев использования
@@ -75,6 +76,7 @@ TFRECORD_FILE_NAME = "TFRecord_dataset"     # Базовое имя выходн
 CHUNK_SIZE = 100_000                        # Размер чанка для потоковой обработки
 TEST_DATASET_SIZE = 10_000                  # Размер тестовой выборки
 VALIDATION_SAMPLE_SIZE = 10_000             # Количество записей для валидации
+RANDOM_SEED = 42                            # Сид разбиения train/test
 
 
 class TFRecordPreprocessor:
@@ -91,7 +93,7 @@ class TFRecordPreprocessor:
     2. Потоковая загрузка данных матчей с фильтрацией
     3. Преобразование hero_id в плотные индексы
     4. Нормализация составов команд (сортировка по индексам)
-    5. Случайное разделение на тестовую и основную выборки
+    5. Случайное разделение на тестовую и основную выборки (фиксируется RANDOM_SEED)
     6. Сериализация в TFRecord формат
     7. Валидация созданных файлов
 
@@ -418,6 +420,9 @@ class TFRecordPreprocessor:
         3. Вытесненные из reservoir примеры записываются в основной файл
         4. В конце обработки весь reservoir записывается в тестовый файл
 
+        Случайность reservoir sampling фиксируется изолированным генератором с сидом
+        RANDOM_SEED, поэтому разбиение воспроизводимо между прогонами.
+
         Raises:
             ValueError: Если в базе данных не найдено валидных матчей для обработки
             Exception: При ошибках работы с базой данных или файловой системой
@@ -450,6 +455,7 @@ class TFRecordPreprocessor:
         # === ЭТАП 2: АНАЛИЗ ПАРАМЕТРОВ ОБРАБОТКИ ===
         print_subsection_header("Параметры обработки", "📋", Colors.BRIGHT_ORANGE)
         print_info_line("Алгоритм выборки тестового файла", "Reservoir Sampling", "🎲", value_color=Colors.BRIGHT_TEAL)
+        print_info_line("Сид разбиения", f"{RANDOM_SEED}", "🎲", value_color=Colors.BRIGHT_YELLOW)
         print_info_line("Общее количество матчей", f"{total_matches:,}", "🎮", value_color=Colors.BRIGHT_GOLD)
         print_info_line("Размер тестового набора", f"{TEST_DATASET_SIZE:,}", "🧪", value_color=Colors.BRIGHT_BLUE)
         print_info_line("Размер чанка", f"{CHUNK_SIZE:,}", "🗂️", value_color=Colors.BRIGHT_YELLOW)
@@ -467,6 +473,10 @@ class TFRecordPreprocessor:
         # Инициализация писателей TFRecord файлов
         main_writer = tf.io.TFRecordWriter(self.main_output_path)
         test_writer = tf.io.TFRecordWriter(self.test_output_path)
+
+        # Изолированный генератор для reservoir sampling: фиксированный сид делает
+        # разбиение воспроизводимым и не затрагивает глобальное состояние random.
+        rng = random.Random(RANDOM_SEED)
 
         # Инициализация переменных для reservoir sampling
         reservoir: List[tf.train.Example] = []  # Буфер для тестовой выборки
@@ -502,10 +512,10 @@ class TFRecordPreprocessor:
                     reservoir.append(example)
                 else:
                     # Фаза замещения: с определенной вероятностью заменяем элемент в reservoir
-                    random_position = random.randint(1, processed_matches)
+                    random_position = rng.randint(1, processed_matches)
                     if random_position <= TEST_DATASET_SIZE:
                         # Выбираем случайный элемент для замены
-                        reservoir_idx = random.randint(0, TEST_DATASET_SIZE - 1)
+                        reservoir_idx = rng.randint(0, TEST_DATASET_SIZE - 1)
                         # Вытесненный элемент отправляем в основной файл
                         main_writer.write(reservoir[reservoir_idx].SerializeToString())
                         main_written += 1
@@ -844,6 +854,7 @@ def main():
                     value_color=Colors.BRIGHT_RED)
     print_info_line("Маппинг ролей", f"core → 0, support → 1", "🎭", value_color=Colors.BRIGHT_PURPLE)
     print_info_line("Маппинг вариантов", f"1 - 6 (аспекты героев)", "🔢", value_color=Colors.BRIGHT_PURPLE)
+    print_info_line("Сид разбиения", f"{RANDOM_SEED}", "🎲", value_color=Colors.BRIGHT_YELLOW)
     print_info_line("Формат вывода", "TFRecord (два файла: основной + тестовый)", "💾", value_color=Colors.BRIGHT_ORANGE)
     print_info_line("Сортировка героев", "Включена (по плотным индексам)", "🔀",
                     value_color=Colors.BRIGHT_GREEN)

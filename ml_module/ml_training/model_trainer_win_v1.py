@@ -16,6 +16,7 @@ Win v1 представляет собой архитектуру, основа�
 - Представление команды: единый вектор без учёта взаимодействий между героями
 - MLP: последовательность Dense → BatchNorm → ReLU → Dropout слоёв
 - Выходной слой: sigmoid активация для вероятности победы Radiant
+- Воспроизводимость: единый сид RANDOM_SEED фиксирует все источники случайности
 
 Архитектурные ограничения:
 - Модель не различает связи между героями (синергии внутри команды или контр-пиков между командами)
@@ -52,6 +53,7 @@ from keras.layers import (
 from keras.metrics import AUC, Precision, Recall
 from keras.optimizers import Adam
 from keras.regularizers import L2
+from keras.utils import set_random_seed
 from sklearn.model_selection import StratifiedKFold
 
 # Локальные импорты
@@ -76,6 +78,7 @@ DEFAULT_DROPOUT_RATE = 0.2          # Коэффициент dropout для ре
 DEFAULT_L2_REG = 0.001              # Коэффициент L2 регуляризации весов
 
 # === КОНСТАНТЫ ОБУЧЕНИЯ ===
+RANDOM_SEED = 42                    # Единый сид воспроизводимости
 DEFAULT_EPOCHS = 1000               # Максимальное количество эпох обучения
 DEFAULT_BATCH_SIZE = 512            # Размер батча при обучении
 DEFAULT_LEARNING_RATE = 0.0005      # Начальная скорость обучения оптимизатора
@@ -154,11 +157,12 @@ class ModelTrainerWinV1:
         Координирует полный цикл обучения ансамбля с K-fold кросс-валидацией.
 
         Последовательность действий:
-        1. Загрузка данных из HDF5 файла (в Dict формате)
-        2. Разбиение на N_FOLDS стратифицированных фолдов
-        3. Обучение отдельной модели на каждом фолде
-        4. Сохранение каждой модели с суффиксом _fold_N
-        5. Вывод итоговой статистики по всем фолдам
+        1. Фиксация сида (RANDOM_SEED) для всех источников случайности
+        2. Загрузка данных из HDF5 файла (в Dict формате)
+        3. Разбиение на N_FOLDS стратифицированных фолдов
+        4. Обучение отдельной модели на каждом фолде
+        5. Сохранение каждой модели с суффиксом _fold_N
+        6. Вывод итоговой статистики по всем фолдам
 
         Args:
             data_file_path (str): Путь к HDF5 файлу с данными
@@ -172,15 +176,18 @@ class ModelTrainerWinV1:
         print_section_header("ПОДГОТОВКА ДАННЫХ К ОБУЧЕНИЮ", "📦", color=Colors.BLUE_2)
 
         try:
+            # Фиксация сида до создания моделей: один вызов покрывает Python random, numpy и бэкенд TF
+            set_random_seed(RANDOM_SEED)
+
             # Вывод конфигурации
             self._print_model_configuration()
 
             # Загрузка данных напрямую через DataLoader
             features_all, labels_all = self.loader.load_data_from_hdf5(data_file_path)
 
-            # Инициализация кросс-валидации
+            # Инициализация кросс-валидации (разбиение завязано на тот же RANDOM_SEED)
             total_samples = features_all['radiant_heroes'].shape[0]
-            skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
+            skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_SEED)
 
             fold_results = []
 
@@ -245,6 +252,8 @@ class ModelTrainerWinV1:
                         Colors.BLUE_3, Colors.CORAL)
 
         # Параметры обучения
+        print_info_line("Фиксированный сид", f"{RANDOM_SEED}", "🎲",
+                        Colors.BLUE_3, Colors.BRIGHT_YELLOW)
         print_info_line("Количество фолдов", f"{N_FOLDS}", "🎯",
                         Colors.BLUE_3, Colors.BRIGHT_WHITE)
         print_info_line("Количество эпох", f"{self.epochs}", "🔁",
