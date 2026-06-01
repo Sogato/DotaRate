@@ -368,8 +368,9 @@ class ModelTrainerWinV1:
         2. Создание и компиляция модели
         3. Настройка callbacks (EarlyStopping, ReduceLROnPlateau)
         4. Обучение через model.fit()
-        5. Сохранение модели с суффиксом _fold_N
-        6. Извлечение метрик и очистка памяти
+        5. Оценка восстановленных лучших весов на валидации (model.evaluate)
+        6. Сохранение модели с суффиксом _fold_N
+        7. Очистка памяти
 
         Args:
             fold_num (int): Номер текущего фолда (1-based)
@@ -425,21 +426,28 @@ class ModelTrainerWinV1:
             verbose=1
         )
 
+        # Оценка восстановленных лучших весов на валидации.
+        val_metrics = model.evaluate(
+            X_val, y_val,
+            batch_size=self.batch_size,
+            verbose=0,
+            return_dict=True
+        )
+        best_val_auc = float(val_metrics['auc'])
+        best_val_acc = float(val_metrics['accuracy'])
+        best_val_loss = float(val_metrics['loss'])
+        epochs_trained = len(history.history['loss'])
+
         # Сохранение модели
         fold_path = self._create_fold_model_path(save_path, fold_num)
         model.save(fold_path)
-
-        # Извлечение метрик
-        best_val_auc = float(max(history.history['val_auc']))
-        best_val_acc = float(max(history.history['val_accuracy']))
-        epochs_trained = len(history.history['loss'])
 
         fold_training_time = time.time() - fold_start_time
 
         # Вывод статистики
         self._print_fold_statistics(
             fold_num, model.count_params(),
-            best_val_auc, best_val_acc, epochs_trained, fold_training_time
+            best_val_auc, best_val_acc, best_val_loss, epochs_trained, fold_training_time
         )
 
         # Очистка памяти: сначала удаляем ссылку на модель, затем очищаем сессию Keras.
@@ -455,6 +463,7 @@ class ModelTrainerWinV1:
             'training_time': fold_training_time,
             'best_val_auc': best_val_auc,
             'best_val_accuracy': best_val_acc,
+            'best_val_loss': best_val_loss,
             'history': history.history
         }
 
@@ -464,7 +473,7 @@ class ModelTrainerWinV1:
         Создает список callbacks для контроля обучения.
 
         Настраивает:
-        - EarlyStopping: остановка при отсутствии улучшения val_auc
+        - EarlyStopping: остановка при отсутствии улучшения val_loss
         - ReduceLROnPlateau: снижение learning rate при плато val_loss
 
         Returns:
@@ -491,15 +500,16 @@ class ModelTrainerWinV1:
 
     @staticmethod
     def _print_fold_statistics(fold_num: int, model_params: int, best_val_auc: float, best_val_acc: float,
-                               epochs_trained: int, training_time: float) -> None:
+                               best_val_loss: float, epochs_trained: int, training_time: float) -> None:
         """
         Выводит статистику завершенного фолда.
 
         Args:
             fold_num (int): Номер фолда
             model_params (int): Количество параметров модели
-            best_val_auc (float): Лучший AUC на валидации
-            best_val_acc (float): Лучшая accuracy на валидации
+            best_val_auc (float): AUC сохранённой модели на валидации
+            best_val_acc (float): Accuracy сохранённой модели на валидации
+            best_val_loss (float): Loss сохранённой модели на валидации
             epochs_trained (int): Количество обученных эпох
             training_time (float): Время обучения в секундах
         """
@@ -507,10 +517,12 @@ class ModelTrainerWinV1:
 
         print_info_line("Эпох обучено", f"{epochs_trained}", "🔁",
                         Colors.BLUE_3, Colors.MINT)
-        print_info_line("Лучший val AUC", f"{best_val_auc:.4f}", "⭐",
+        print_info_line("Val AUC", f"{best_val_auc:.4f}", "⭐",
                         Colors.BLUE_3, Colors.GOLD_1)
-        print_info_line("Лучшая val accuracy", f"{best_val_acc:.4f}", "🌟",
+        print_info_line("Val accuracy", f"{best_val_acc:.4f}", "🌟",
                         Colors.BLUE_3, Colors.GOLD_3)
+        print_info_line("Val loss", f"{best_val_loss:.4f}", "📉",
+                        Colors.BLUE_3, Colors.BRIGHT_PURPLE)
         print_info_line("Параметров модели", f"{model_params:,}", "🧩",
                         Colors.BLUE_3, Colors.BRIGHT_CYAN)
         print_info_line("Время обучения", f"{training_time / 60:.1f} мин.", "⏱️",
