@@ -26,11 +26,17 @@ Win v1 представляет собой архитектуру, основа�
 
 Эта архитектура служит отправной точкой для оценки предсказательной способности
 моделей на основе только составов героев с минимальной архитектурной сложностью.
+
+Структура хранения моделей:
+Каждое обучение сохраняется в отдельную папку прогона:
+
+    models / <DOTA_VERSION> / <MODEL_TYPE> / <MODEL_VERSION> / run_<NNN> / model_*_fold_N.keras
 """
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 
 # Стандартные библиотеки
+import re
 import sys
 import time
 from pathlib import Path
@@ -69,7 +75,13 @@ from utils.console import (
 
 # === КОНСТАНТЫ ФАЙЛОВ ===
 HDF5_FILENAME = "HDF5_dataset_{version}_main.h5"    # Имя HDF5 файла с данными
-MODEL_FILENAME = "model_win_v1_{version}.keras"     # Имя сохраняемой модели
+MODEL_FILENAME = "model_win_v1_{version}.keras"     # Базовое имя сохраняемой модели
+
+# === КОНСТАНТЫ СТРУКТУРЫ ХРАНЕНИЯ ===
+MODEL_TYPE = "win"                                      # Тип модели
+MODEL_VERSION = "v1"                                    # Версия модели данного типа
+RUN_DIR_PREFIX = "run_"                                 # Префикс папки прогона
+RUN_DIR_PATTERN = re.compile(r"run_(\d+)(?:_.*)?$")     # Папка прогона: run_<номер> с опциональной меткой
 
 # === КОНСТАНТЫ АРХИТЕКТУРЫ ===
 DEFAULT_HIDDEN_UNITS = [256, 128]   # Размеры скрытых Dense слоев
@@ -86,7 +98,7 @@ N_FOLDS = 5                         # Количество фолдов для �
 
 # === КОНСТАНТЫ CALLBACKS ===
 # EarlyStopping - остановка обучения при отсутствии улучшений
-EARLY_STOPPING_PATIENCE = 25        # Количество эпох без улучшения до остановки
+EARLY_STOPPING_PATIENCE = 4        # Количество эпох без улучшения до остановки
 EARLY_STOPPING_MIN_DELTA = 0.0001   # Минимальное изменение для учета как улучшение
 EARLY_STOPPING_MONITOR = 'val_loss' # Метрика для отслеживания
 EARLY_STOPPING_MODE = 'min'         # Режим отслеживания
@@ -141,6 +153,7 @@ class ModelTrainerWinV1:
             dropout_rate (float): Коэффициент dropout
             l2_reg (float): Коэффициент L2 регуляризации
         """
+
         self.loader = DataLoaderWinV1()
 
         # Параметры обучения
@@ -173,6 +186,7 @@ class ModelTrainerWinV1:
             OSError: Если не удается получить доступ к файлу
             ValueError: Если данные некорректны (пустой датасет и т.д.)
         """
+
         print_section_header("ПОДГОТОВКА ДАННЫХ К ОБУЧЕНИЮ", "📦", color=Colors.BLUE_2)
 
         try:
@@ -233,6 +247,7 @@ class ModelTrainerWinV1:
         """
         Выводит конфигурацию модели: архитектуру, регуляризацию, параметры обучения.
         """
+
         print_subsection_header("Конфигурация модели", "🔧", Colors.TEAL_2)
 
         # Архитектура
@@ -293,6 +308,7 @@ class ModelTrainerWinV1:
         Returns:
             Model: Скомпилированная модель готовая к обучению
         """
+
         # Входные слои
         radiant_input = Input(shape=(TEAM_SIZE,), dtype='int32', name='radiant_heroes')
         dire_input = Input(shape=(TEAM_SIZE,), dtype='int32', name='dire_heroes')
@@ -383,6 +399,7 @@ class ModelTrainerWinV1:
         Returns:
             Dict[str, Any]: Результаты фолда с метриками и путем к модели
         """
+
         print_subsection_header(f"Обучение фолда {fold_num}/{N_FOLDS}", "🎯", Colors.BRIGHT_GREEN)
 
         fold_start_time = time.time()
@@ -479,6 +496,7 @@ class ModelTrainerWinV1:
         Returns:
             List[Callback]: Список настроенных callbacks
         """
+
         return [
             EarlyStopping(
                 monitor=EARLY_STOPPING_MONITOR,
@@ -513,6 +531,7 @@ class ModelTrainerWinV1:
             epochs_trained (int): Количество обученных эпох
             training_time (float): Время обучения в секундах
         """
+
         print_subsection_header(f"Результаты фолда {fold_num}", "📈", Colors.BRIGHT_GREEN)
 
         print_info_line("Эпох обучено", f"{epochs_trained}", "🔁",
@@ -536,6 +555,7 @@ class ModelTrainerWinV1:
         Args:
             fold_results (List[Dict[str, Any]]): Результаты всех фолдов
         """
+
         print_section_header("ФИНАЛЬНЫЕ РЕЗУЛЬТАТЫ АНСАМБЛЯ", "🏆", color=Colors.GOLD_1)
 
         # Расчет средних метрик
@@ -581,6 +601,7 @@ class ModelTrainerWinV1:
         Returns:
             str: Путь для сохранения модели фолда
         """
+
         path_obj = Path(base_path)
         return str(path_obj.with_name(f"{path_obj.stem}_fold_{fold_num}{path_obj.suffix}"))
 
@@ -589,6 +610,7 @@ def print_startup_header() -> None:
     """
     Выводит стартовый заголовок программы.
     """
+
     print_section_header("ЗАПУСК ОБУЧЕНИЯ WIN-PREDICTOR V1", "🚀", color=Colors.VIOLET_2)
     print_info_line("Версия модели", "Win Prediction v1", "🤖",
                     Colors.BLUE_3, Colors.BRIGHT_CYAN)
@@ -600,51 +622,97 @@ def print_startup_header() -> None:
                     Colors.BLUE_3, Colors.GOLD_3)
 
 
-def validate_paths(data_file: str, output_dir: Path) -> bool:
+def resolve_next_run_dir(version_dir: Path) -> Path:
     """
-    Проверяет существование HDF5 файла и возможность создания директории моделей.
+    Определяет директорию следующего прогона с инкрементным номером.
+
+    Сканирует version_dir на наличие папок прогонов (run_*), извлекает их номера
+    регулярным выражением RUN_DIR_PATTERN и возвращает путь к следующей папке с
+    номером max+1, дополненным нулями до трёх цифр (run_001, run_002, ...).
+
+    Номер берётся из цифр сразу после префикса, а необязательная ручная метка после
+    цифр (например, run_001_best) игнорируется при извлечении номера. За счёт этого
+    нумерация остаётся согласованной даже если папки прогонов переименованы вручную:
+    переименованный run_001_best всё равно считается занятым номером 1.
+
+    Ведущие нули обязательны для лексикографической сортировки папок (без них run_10
+    встал бы между run_1 и run_2). Трёх цифр хватает на 999 прогонов.
+
+    Args:
+        version_dir (Path): Директория версии модели (.../<dota>/<type>/<version>)
+
+    Returns:
+        Path: Путь к директории следующего прогона (ещё не созданной)
+    """
+
+    existing_numbers = []
+    for path in version_dir.glob(f"{RUN_DIR_PREFIX}*"):
+        if not path.is_dir():
+            continue
+        match = RUN_DIR_PATTERN.match(path.name)
+        if match:
+            existing_numbers.append(int(match.group(1)))
+
+    next_number = max(existing_numbers, default=0) + 1
+    return version_dir / f"{RUN_DIR_PREFIX}{next_number:03d}"
+
+
+def prepare_paths(data_file: str, version_dir: Path) -> Optional[Path]:
+    """
+    Проверяет источник данных и подготавливает директорию прогона для сохранения моделей.
+
+    Выводит две независимые группы информации: входные данные и хранение моделей.
 
     Args:
         data_file (str): Путь к HDF5 файлу с данными
-        output_dir (Path): Директория для сохранения моделей
+        version_dir (Path): Директория версии модели (.../<dota>/<type>/<version>)
 
     Returns:
-        bool: True если все проверки пройдены, False иначе
+        Optional[Path]: Путь к созданной папке прогона при успехе, None при ошибке
     """
-    print_subsection_header("Проверка путей и файлов", "🔍", Colors.AMBER_2)
 
-    # Проверка HDF5 файла
+    #Блок 1: входные данные
+    print_subsection_header("Входные данные", "🗃️", Colors.AMBER_2)
+
     data_file_path = Path(data_file)
     if not data_file_path.exists():
         print_status_message(f"HDF5 файл не найден: {data_file}", "error", "❌")
-        return False
+        return None
 
     file_size_mb = data_file_path.stat().st_size / (1024 * 1024)
-    print_info_line("HDF5 файл", data_file_path.name, "🗃️",
+    print_info_line("Файл", data_file_path.name, "📦",
                     Colors.BLUE_3, Colors.BRIGHT_GREEN)
-    print_info_line("Размер файла", f"{file_size_mb:.2f} MB", "📏",
+    print_info_line("Размер", f"{file_size_mb:.2f} MB", "📏",
                     Colors.BLUE_3, Colors.BRIGHT_WHITE)
-    print_info_line("Полный путь", str(data_file_path), "📂",
+    print_info_line("Путь", str(data_file_path), "📂",
                     Colors.BLUE_3, Colors.AMBER_4)
 
-    # Создание и проверка директории моделей
+    #Блок 2: хранение моделей
+    print_subsection_header("Хранение моделей", "💾", Colors.AMBER_2)
+
     try:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        # Проверка возможности записи
-        test_file = output_dir / ".write_test"
+        # Создание цепочки директорий версии и проверка возможности записи
+        version_dir.mkdir(parents=True, exist_ok=True)
+        test_file = version_dir / ".write_test"
         test_file.touch()
         test_file.unlink()
 
-        print_info_line("Директория моделей", output_dir.name, "💾",
-                        Colors.BLUE_3, Colors.BRIGHT_GREEN)
-        print_info_line("Полный путь", str(output_dir), "📂",
-                        Colors.BLUE_3, Colors.AMBER_4)
-        print()
+        # Определение и создание папки текущего прогона (инкрементный номер)
+        run_dir = resolve_next_run_dir(version_dir)
+        run_dir.mkdir(parents=True, exist_ok=True)
     except (OSError, PermissionError) as e:
         print_status_message(f"Невозможно создать/использовать директорию моделей: {e}", "error", "❌")
-        return False
+        return None
 
-    return True
+    print_info_line("Тип / версия", f"{MODEL_TYPE} {MODEL_VERSION} (Dota {DOTA_VERSION})", "🧩",
+                    Colors.BLUE_3, Colors.BRIGHT_GREEN)
+    print_info_line("Прогон", run_dir.name, "🔢",
+                    Colors.BLUE_3, Colors.BRIGHT_CYAN)
+    print_info_line("Путь", str(run_dir), "📂",
+                    Colors.BLUE_3, Colors.AMBER_4)
+    print()
+
+    return run_dir
 
 
 def main() -> None:
@@ -658,16 +726,21 @@ def main() -> None:
     models_dir = Path(__file__).parent.parent / "models"
 
     hdf5_file_path = str(data_dir / HDF5_FILENAME.format(version=DOTA_VERSION))
-    model_output_path = str(models_dir / MODEL_FILENAME.format(version=DOTA_VERSION))
+    version_dir = models_dir / DOTA_VERSION / MODEL_TYPE / MODEL_VERSION    # Директория версии модели
 
-    # Проверка путей
-    if not validate_paths(hdf5_file_path, models_dir):
-        print_status_message("Проверка путей не пройдена. Завершение программы.", "error")
+    # Подготовка путей: проверка источника и создание папки прогона
+    run_dir = prepare_paths(hdf5_file_path, version_dir)
+    if run_dir is None:
+        print_status_message("Подготовка путей не пройдена. Завершение программы.", "error")
         sys.exit(1)
+
+    # Базовый путь к моделям внутри папки прогона
+    model_output_path = str(run_dir / MODEL_FILENAME.format(version=DOTA_VERSION))
 
     # Создание тренера и запуск обучения
     trainer = ModelTrainerWinV1(epochs=DEFAULT_EPOCHS)
     trainer.train(data_file_path=hdf5_file_path, base_model_path=model_output_path)
+
 
 if __name__ == "__main__":
     main()

@@ -15,20 +15,27 @@
 - Отдельные модели фолдов: метрика каждой по отдельности — их разброс (mean ± std).
 
 Сценарий тестирования:
-1. Интерактивный выбор источника данных (HDF5 или БД)
-2. Адаптивное обнаружение моделей ансамбля по шаблону имени фолдов
-3. Загрузка данных и приведение к единому Dict формату через загрузчик
-4. Получение предсказаний по каждой модели и усреднение в ансамбль
-5. Расчёт метрик ансамбля, метрик отдельных моделей и сравнение с baseline
+1. Интерактивный выбор прогона (ансамбля) для тестирования
+2. Интерактивный выбор источника данных (HDF5 или БД)
+3. Адаптивное обнаружение моделей ансамбля внутри папки прогона
+4. Загрузка данных и приведение к единому Dict формату через загрузчик
+5. Получение предсказаний по каждой модели и усреднение в ансамбль
+6. Расчёт метрик ансамбля, метрик отдельных моделей и сравнение с baseline
 
 Метрики ансамбля считаются один раз за прогон и используются дважды: компоненты матрицы
 ошибок выводятся в начале отчёта, а основные показатели качества — в конце. Один и тот же
 прогон моделей даёт и метрики ансамбля (среднее по моделям), и метрики отдельных фолдов.
+
+Структура хранения моделей:
+Модели лежат в папках прогонов, созданных тренером:
+
+    models / <DOTA_VERSION> / <MODEL_TYPE> / <MODEL_VERSION> / run_<NNN> / model_*_fold_N.keras
 """
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 
 # Стандартные библиотеки
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -53,6 +60,12 @@ from utils.console import (
 # === КОНСТАНТЫ ФАЙЛОВ ===
 HDF5_FILENAME = "HDF5_dataset_{version}_test.h5"    # Имя HDF5 файла с тестовой выборкой
 MODEL_FILENAME = "model_win_v1_{version}.keras"     # Базовое имя моделей (суффикс _fold_N в именах фолдов)
+
+# === КОНСТАНТЫ СТРУКТУРЫ ХРАНЕНИЯ ===
+MODEL_TYPE = "win"                                      # Тип модели
+MODEL_VERSION = "v1"                                    # Версия модели данного типа
+RUN_DIR_PREFIX = "run_"                                 # Префикс папки прогона
+RUN_DIR_PATTERN = re.compile(r"run_(\d+)(?:_.*)?$")     # Папка прогона: run_<номер> с опциональной меткой
 
 # === КОНСТАНТЫ ТЕСТИРОВАНИЯ ===
 DEFAULT_LEAGUE_IDS: Set[int] = set()        # Фильтр по ID лиг для БД, например {5401, 4266} (пустое множество = все лиги)
@@ -129,8 +142,8 @@ class ModelTesterWinV1:
         обоих источников данных.
 
         Args:
-            model_base_path (str): Базовый путь к моделям; суффикс _fold_N.keras
-                обнаруживается автоматически сканированием директории
+            model_base_path (str): Базовый путь к моделям внутри папки прогона;
+                суффикс _fold_N.keras обнаруживается автоматически сканированием директории
             data_source (str): Источник данных ('db' или 'hdf5')
             hdf5_path (Optional[str]): Путь к HDF5 файлу (требуется для data_source='hdf5')
 
@@ -676,6 +689,81 @@ class ModelTesterWinV1:
                         Colors.BLUE_3, Colors.BRIGHT_YELLOW)
 
 
+def select_run(version_dir: Path) -> Path:
+    """
+    Определяет ансамбль для тестирования, при необходимости запрашивая выбор у пользователя.
+
+    Сканирует version_dir на наличие папок ансамблей (run_*), извлекает их номера тем же
+    регулярным выражением, что использует trainer.
+
+    Поведение зависит от числа найденных ансамблей:
+    - Ноль → сообщение об ошибке и завершение программы
+    - Один → выбирается автоматически; строка о нём дописывается к стартовому блоку
+    - Несколько → секция выбора со списком (число моделей в каждом) и запрос в цикле
+
+    При нескольких ансамблях выбор делается по номеру, а не по позиции в списке: номер
+    совпадает с тем, что видит пользователь, и устойчив к пропускам в нумерации.
+    Пустой ввод (Enter) выбирает последний сохранённый ансамбль.
+
+    Args:
+        version_dir (Path): Директория версии модели (.../<dota>/<type>/<version>)
+
+    Returns:
+        Path: Путь к выбранной папке ансамбля
+    """
+
+    # Сбор доступных ансамблей
+    runs: Dict[int, Path] = {}
+    for path in version_dir.glob(f"{RUN_DIR_PREFIX}*"):
+        if not path.is_dir():
+            continue
+        match = RUN_DIR_PATTERN.match(path.name)
+        if match:
+            runs[int(match.group(1))] = path
+
+    if not runs:
+        print_status_message(f"Не найдено ансамблей в {version_dir}", "error", "❌")
+        sys.exit(1)
+
+    latest = max(runs)
+
+    # Единственный ансамбль: выбора нет, дописываем строку к стартовому блоку
+    if len(runs) == 1:
+        run_dir = runs[latest]
+        print_info_line("Ансамбль", run_dir.name, "📦",
+                        Colors.BLUE_3, Colors.BRIGHT_GREEN)
+        return run_dir
+
+    # Несколько ансамблей: выбор происходит
+    print_section_header("ВЫБОР АНСАМБЛЯ", "🎯", 80, Colors.BRIGHT_CYAN)
+
+    # Список доступных ансамблей с числом найденных моделей
+    print_subsection_header("Доступные ансамбли", "📋", Colors.BRIGHT_YELLOW)
+    for num in sorted(runs, reverse=True):
+        model_count = len(list(runs[num].glob("*_fold_*.keras")))
+        run_value = f"{Colors.BRIGHT_GREEN}{model_count} моделей{Colors.RESET}"
+        if num == latest:
+            run_value += f"  {Colors.DIM}← последний{Colors.RESET}"
+        print_info_line(runs[num].name, run_value, "📦",
+                        Colors.BLUE_3, Colors.RESET)
+    print()
+
+    # Цикл запроса до получения корректного ввода
+    while True:
+        choice = input(f"{Colors.BRIGHT_GOLD}Введите номер ансамбля "
+                       f"(Enter — последний): {Colors.RESET}").strip()
+        if choice == "":
+            selected = runs[latest]
+        elif choice.isdigit() and int(choice) in runs:
+            selected = runs[int(choice)]
+        else:
+            print_status_message("Неверный выбор! Введите номер из списка", "error", "❌")
+            continue
+
+        print_status_message(f"Выбран ансамбль {selected.name}", "success", "✅")
+        return selected
+
+
 def select_data_source() -> str:
     """
     Интерактивно запрашивает у пользователя источник данных для тестирования.
@@ -727,21 +815,27 @@ def print_startup_header() -> None:
 
 
 def main() -> None:
-    """Точка входа: интерактивный выбор источника данных и запуск тестирования."""
+    """Точка входа: интерактивный выбор прогона и источника данных, запуск тестирования."""
 
     # Стартовый заголовок
     print_startup_header()
 
-    # Интерактивный выбор источника данных
+    # Определение путей
+    data_dir = Path(__file__).parent.parent / "datasets"
+    models_dir = Path(__file__).parent.parent / "models"
+    version_dir = models_dir / DOTA_VERSION / MODEL_TYPE / MODEL_VERSION    # Директория версии модели
+
+    # Выбор ансамбля
+    run_dir = select_run(version_dir)
+    print()
+
+    # Интерактивный выбор источника данных (на чём тестируем)
     data_source = select_data_source()
     print()
 
-    # Определение путей (версия берётся из config)
-    data_dir = Path(__file__).parent.parent / "datasets"
-    models_dir = Path(__file__).parent.parent / "models"
-
     hdf5_file_path = str(data_dir / HDF5_FILENAME.format(version=DOTA_VERSION))
-    model_base_path = str(models_dir / MODEL_FILENAME.format(version=DOTA_VERSION))
+    # Базовый путь к моделям внутри выбранной папки прогона
+    model_base_path = str(run_dir / MODEL_FILENAME.format(version=DOTA_VERSION))
 
     # Создание тестера и запуск тестирования
     tester = ModelTesterWinV1(
