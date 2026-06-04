@@ -98,7 +98,7 @@ N_FOLDS = 5                         # Количество фолдов для �
 
 # === КОНСТАНТЫ CALLBACKS ===
 # EarlyStopping - остановка обучения при отсутствии улучшений
-EARLY_STOPPING_PATIENCE = 4        # Количество эпох без улучшения до остановки
+EARLY_STOPPING_PATIENCE = 25        # Количество эпох без улучшения до остановки
 EARLY_STOPPING_MIN_DELTA = 0.0001   # Минимальное изменение для учета как улучшение
 EARLY_STOPPING_MONITOR = 'val_loss' # Метрика для отслеживания
 EARLY_STOPPING_MODE = 'min'         # Режим отслеживания

@@ -8,6 +8,7 @@
 
 Основные возможности:
 - Загрузка данных матчей из PostgreSQL базы данных с пагинацией
+- Опциональное ограничение общего количества обрабатываемых матчей через константу
 - Преобразование hero_id в плотные индексы через HeroMapper для оптимального представления
 - Фильтрация и исключение определенных героев из обработки
 - Нормализация и сортировка составов команд для независимости от порядка
@@ -73,6 +74,7 @@ from utils.hero_mapper import HeroMapper
 
 # === НАСТРОЙКИ TFRECORD ПРЕПРОЦЕССОРА ===
 TFRECORD_FILE_NAME = "TFRecord_dataset"     # Базовое имя выходных файлов
+MAX_TOTAL_MATCHES = None                    # Лимит общего числа матчей (None — без ограничения)
 CHUNK_SIZE = 100_000                        # Размер чанка для потоковой обработки
 TEST_DATASET_SIZE = 10_000                  # Размер тестовой выборки
 VALIDATION_SAMPLE_SIZE = 10_000             # Количество записей для валидации
@@ -91,11 +93,12 @@ class TFRecordPreprocessor:
     Основные этапы обработки:
     1. Подключение к базе данных и инициализация маппера героев
     2. Потоковая загрузка данных матчей с фильтрацией
-    3. Преобразование hero_id в плотные индексы
-    4. Нормализация составов команд (сортировка по индексам)
-    5. Случайное разделение на тестовую и основную выборки (фиксируется RANDOM_SEED)
-    6. Сериализация в TFRecord формат
-    7. Валидация созданных файлов
+    3. Опциональное ограничение общего количества матчей константой MAX_TOTAL_MATCHES
+    4. Преобразование hero_id в плотные индексы
+    5. Нормализация составов команд (сортировка по индексам)
+    6. Случайное разделение на тестовую и основную выборки (фиксируется RANDOM_SEED)
+    7. Сериализация в TFRecord формат
+    8. Валидация созданных файлов
 
     Attributes:
         test_output_path (str): Путь для сохранения тестового TFRecord файла
@@ -112,14 +115,29 @@ class TFRecordPreprocessor:
         Создает два выходных файла: основной для обучения и тестовый для валидации.
         Инициализирует подключение к базе данных и маппер героев с исключениями.
 
+        Перед любой работой с базой данных выполняется проверка корректности
+        конфигурации: если задан MAX_TOTAL_MATCHES и он меньше TEST_DATASET_SIZE,
+        инициализация прерывается.
+
         Args:
             base_output_path (str): Базовый путь для формирования имен выходных файлов
             database_url (str, optional): URL подключения к базе данных.
                 По умолчанию используется DATASET_DATABASE_URL из конфигурации
 
         Raises:
+            ValueError: Если MAX_TOTAL_MATCHES задан и меньше TEST_DATASET_SIZE
             Exception: При ошибках подключения к базе данных или инициализации маппера
         """
+        # === ПРОВЕРКА КОРРЕКТНОСТИ КОНФИГУРАЦИИ ===
+        # Лимит не должен быть меньше тестовой выборки.
+        if MAX_TOTAL_MATCHES is not None and MAX_TOTAL_MATCHES < TEST_DATASET_SIZE:
+            raise ValueError(
+                f"MAX_TOTAL_MATCHES ({MAX_TOTAL_MATCHES:,}) меньше TEST_DATASET_SIZE "
+                f"({TEST_DATASET_SIZE:,}). Лимит общего числа матчей должен быть не меньше "
+                f"размера тестовой выборки, иначе основной набор останется пустым. "
+                f"Увеличьте MAX_TOTAL_MATCHES или уменьшите TEST_DATASET_SIZE."
+            )
+
         # Формируем пути для тестового и основного файлов
         base_name = os.path.splitext(base_output_path)[0]
         self.test_output_path = f"{base_name}_test.tfrecord"
@@ -408,10 +426,11 @@ class TFRecordPreprocessor:
 
         Основной метод для создания датасета. Выполняет полный цикл обработки:
         1. Анализ объема данных в базе и планирование обработки
-        2. Потоковую загрузку данных по чанкам с keyset пагинацией
-        3. Применение reservoir sampling для равномерного распределения тестовой выборки
-        4. Запись данных в два отдельных TFRecord файла
-        5. Вывод детальной статистики процесса
+        2. Опциональное ограничение общего объема обработки константой MAX_TOTAL_MATCHES
+        3. Потоковую загрузку данных по чанкам с keyset пагинацией
+        4. Применение reservoir sampling для равномерного распределения тестовой выборки
+        5. Запись данных в два отдельных TFRecord файла
+        6. Вывод детальной статистики процесса
 
         Алгоритм разделения данных:
         1. Первые TEST_DATASET_SIZE примеров попадают в reservoir (буфер тестовой выборки)
@@ -422,6 +441,11 @@ class TFRecordPreprocessor:
 
         Случайность reservoir sampling фиксируется изолированным генератором с сидом
         RANDOM_SEED, поэтому разбиение воспроизводимо между прогонами.
+
+        Ограничение MAX_TOTAL_MATCHES:
+            При заданном лимите обрабатываются первые MAX_TOTAL_MATCHES матчей по
+            возрастанию match_id (следствие keyset пагинации). Обработка прекращается,
+            как только лимит достигнут, что также экономит время и память.
 
         Raises:
             ValueError: Если в базе данных не найдено валидных матчей для обработки
@@ -446,6 +470,12 @@ class TFRecordPreprocessor:
             print_status_message("В базе данных не найдено матчей для обработки!", "error", "❌")
             return
 
+        # === ОГРАНИЧЕНИЕ ОБЩЕГО КОЛИЧЕСТВА МАТЧЕЙ ===
+        # Если задан лимит ограничиваем общий объём обработки.
+        db_total_matches = total_matches
+        if MAX_TOTAL_MATCHES is not None:
+            total_matches = min(total_matches, MAX_TOTAL_MATCHES)
+
         # Создание выходных директорий
         print_status_message("Создание выходных директорий...", "info", "📁")
         os.makedirs(os.path.dirname(self.test_output_path), exist_ok=True)
@@ -453,10 +483,13 @@ class TFRecordPreprocessor:
         print_status_message("Директории созданы", "success", "✅")
 
         # === ЭТАП 2: АНАЛИЗ ПАРАМЕТРОВ ОБРАБОТКИ ===
+        limit_text = f"{MAX_TOTAL_MATCHES:,}" if MAX_TOTAL_MATCHES is not None else "без ограничения"
         print_subsection_header("Параметры обработки", "📋", Colors.BRIGHT_ORANGE)
         print_info_line("Алгоритм выборки тестового файла", "Reservoir Sampling", "🎲", value_color=Colors.BRIGHT_TEAL)
         print_info_line("Сид разбиения", f"{RANDOM_SEED}", "🎲", value_color=Colors.BRIGHT_YELLOW)
-        print_info_line("Общее количество матчей", f"{total_matches:,}", "🎮", value_color=Colors.BRIGHT_GOLD)
+        print_info_line("Матчей в базе", f"{db_total_matches:,}", "🗄️", value_color=Colors.BRIGHT_CYAN)
+        print_info_line("Лимит матчей", limit_text, "🔢", value_color=Colors.BRIGHT_YELLOW)
+        print_info_line("К обработке", f"{total_matches:,}", "🎮", value_color=Colors.BRIGHT_GOLD)
         print_info_line("Размер тестового набора", f"{TEST_DATASET_SIZE:,}", "🧪", value_color=Colors.BRIGHT_BLUE)
         print_info_line("Размер чанка", f"{CHUNK_SIZE:,}", "🗂️", value_color=Colors.BRIGHT_YELLOW)
 
@@ -502,7 +535,13 @@ class TFRecordPreprocessor:
 
             # Обработка каждого матча в чанке
             chunk_valid = 0
+            limit_reached = False
             for match_data in chunk_data:
+                # Останавливаемся при достижении лимита общего числа матчей
+                if MAX_TOTAL_MATCHES is not None and processed_matches >= MAX_TOTAL_MATCHES:
+                    limit_reached = True
+                    break
+
                 processed_matches += 1
                 example = self._create_match_example(match_data)
 
@@ -545,6 +584,10 @@ class TFRecordPreprocessor:
 
             # Прогресс-бар общего выполнения
             print_progress_bar(chunk_idx, total_chunks, "Общий прогресс:", 40, Colors.BRIGHT_GREEN, Colors.DIM)
+
+            # Прекращаем обработку, если достигнут лимит общего числа матчей
+            if limit_reached:
+                break
 
         # Проверка на наличие валидных данных
         if valid_matches == 0:
@@ -844,6 +887,7 @@ def main():
     print_section_header("ИНИЦИАЛИЗАЦИЯ СОЗДАНИЯ TFRECORD ФАЙЛОВ", "🤖", width=100, color=Colors.BRIGHT_GOLD)
 
     # === ИНФОРМАЦИЯ О ФОРМАТЕ ДАННЫХ ===
+    limit_text = f"{MAX_TOTAL_MATCHES:,}" if MAX_TOTAL_MATCHES is not None else "без ограничения"
     print_info_line("Входные данные", f"Составы героев обеих команд ({TEAM_SIZE} vs {TEAM_SIZE})", "👥",
                     value_color=Colors.BRIGHT_CYAN)
     print_info_line("Выходные данные", "Результат матча + дополнительная статистика", "🔮",
@@ -854,6 +898,7 @@ def main():
                     value_color=Colors.BRIGHT_RED)
     print_info_line("Маппинг ролей", f"core → 0, support → 1", "🎭", value_color=Colors.BRIGHT_PURPLE)
     print_info_line("Маппинг вариантов", f"1 - 6 (аспекты героев)", "🔢", value_color=Colors.BRIGHT_PURPLE)
+    print_info_line("Лимит матчей", limit_text, "🔢", value_color=Colors.BRIGHT_YELLOW)
     print_info_line("Сид разбиения", f"{RANDOM_SEED}", "🎲", value_color=Colors.BRIGHT_YELLOW)
     print_info_line("Формат вывода", "TFRecord (два файла: основной + тестовый)", "💾", value_color=Colors.BRIGHT_ORANGE)
     print_info_line("Сортировка героев", "Включена (по плотным индексам)", "🔀",
