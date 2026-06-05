@@ -1,32 +1,36 @@
 """
-Модуль загрузки данных для модели Win v1 предсказания исходов матчей Dota 2.
+Универсальный модуль загрузки данных для моделей предсказания по составам Dota 2.
 
-Модуль обеспечивает загрузку и предобработку данных для трёх источников:
-HDF5 файлов, базы данных и одиночных матчей. Преобразует составы команд
-в единый формат для входного слоя модели Win v1.
+Модуль обеспечивает загрузку и предобработку данных из трёх источников
+(HDF5 файл, база данных, одиночный матч) и приводит их к единому формату
+входных признаков. Один загрузчик обслуживает несколько типов моделей, каждая
+из которых решает свою задачу по одним и тем же признакам — составам команд.
 
-Задача модели Win v1:
-- Бинарная классификация: победа команды Radiant (1) или команды Dire (0)
-- Входные признаки: составы команд по 5 героев (плотные индексы)
-- Целевая переменная: radiant_win (наличие зависит от источника)
+Типы целевой переменной (target):
+- 'win'   — бинарная классификация: победа Radiant (1) или Dire (0). Метки (N,)
+- 'score' — два счёта команд (radiant_score, dire_score). Метки (N, 2)
+- 'time'  — длительность матча в секундах (duration). Метки (N,)
+
+Соответствие типа набору полей задаётся словарём TARGET_FIELDS.
 
 Источники данных и их предобработка:
 1. HDF5 файлы:
-   - Данные уже содержат плотные индексы
-   - Проверяется валидность данных (непустой датасет)
+   - Данные уже содержат плотные индексы героев и все целевые поля
+   - Признаки и метки читаются напрямую, метки приводятся к float32
    - Возвращает: (features_dict, labels)
 
-2. База данных:
-   - Запрос матчей из БД с фильтром по лигам и лимитом
+2. База данных профессиональных матчей:
+   - Запрос матчей с опциональным фильтром по лигам и лимитом
    - Валидация состава и преобразование hero_id → плотные индексы
+   - Целевые поля читаются прямо из записи матча (ProMatch)
    - Возвращает: (features_dict, labels)
 
 3. Одиночный матч:
    - Данные содержат исходные hero_id
    - Применяется: hero_id → плотные индексы
-   - Возвращает: (features_dict) без labels
+   - Возвращает: (features_dict) без меток
 
-Все методы возвращают единый формат Dict для признаков:
+Единый формат признаков для всех источников:
 {'radiant_heroes': np.ndarray, 'dire_heroes': np.ndarray}
 """
 
@@ -64,23 +68,34 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 # === КОНСТАНТЫ ЗАГРУЗКИ ИЗ БД ===
 DB_PLAYERS_FETCH_CHUNK_SIZE = 1000  # Размер чанка match_id для батчевого запроса игроков
 
+# === СООТВЕТСТВИЕ ТИПА МОДЕЛИ ЦЕЛЕВЫМ ПОЛЯМ ===
+TARGET_FIELDS: Dict[str, Tuple[str, ...]] = {
+    'win': ('radiant_win',),
+    'score': ('radiant_score', 'dire_score'),
+    'time': ('duration',),
+}
 
-class DataLoaderWinV1:
+
+class DataLoaderV1:
     """
-    Загрузчик данных для модели Win v1 предсказания исходов матчей Dota 2.
+    Универсальный загрузчик данных V1 для моделей предсказания по составам Dota 2.
 
     Класс преобразует данные матчей из различных источников в единый формат:
-    плотные индексы героев, готовые для embedding слоев.
+    плотные индексы героев. Тип целевой переменной выбирается параметром target
+    и определяет, какие поля читаются как метки.
 
-    Этапы предобработки:
-    1. Преобразование hero_id в плотные индексы (если требуется)
+    На признаки тип модели не влияет.
+
+    Этапы предобработки признаков:
+    1. Преобразование hero_id в плотные индексы (если данные ещё не индексы)
     2. Формирование numpy массивов в Dict формате
 
     Примечание о порядке героев:
     Состав команды агрегируется в модели через permutation-invariant pooling
     (average pooling по 5 героям), поэтому порядок индексов внутри команды
-    не влияет на результат. Сортировка составов не выполняется намеренно —
-    она была бы лишней вычислительной работой без эффекта на обучение.
+    не влияет на результат.
+
+    Сортировка составов не выполняется.
 
     Attributes:
         hero_mapper (HeroMapper): Маппер для преобразования hero_id в плотные индексы
@@ -95,6 +110,31 @@ class DataLoaderWinV1:
         """
 
         self.hero_mapper = HeroMapper(excluded_hero_ids=excluded_hero_ids)
+
+    @staticmethod
+    def _resolve_target_fields(target: str) -> Tuple[str, ...]:
+        """
+        Возвращает набор целевых полей для указанного типа модели.
+
+        Служит единой точкой проверки параметра target для всех источников:
+        неизвестное значение приводит к ошибке вместо обращения к
+        несуществующему датасету или атрибуту.
+
+        Args:
+            target (str): Тип целевой переменной ('win', 'score' или 'time')
+
+        Returns:
+            Tuple[str, ...]: Имена полей, читаемых как метки (в порядке столбцов)
+
+        Raises:
+            ValueError: Если target отсутствует в TARGET_FIELDS
+        """
+
+        try:
+            return TARGET_FIELDS[target]
+        except KeyError:
+            available = ", ".join(TARGET_FIELDS)
+            raise ValueError(f"Неизвестный target '{target}'. Доступные: {available}")
 
     def _process_team_heroes(self, heroes: Union[List[int], np.ndarray], from_ids: bool = True) -> np.ndarray:
         """
@@ -128,37 +168,86 @@ class DataLoaderWinV1:
         return np.array(indices, dtype=np.int32)
 
     @staticmethod
-    def load_data_from_hdf5(hdf5_path: str) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
+    def _print_target_statistics(labels_all: np.ndarray, target: str) -> None:
         """
-        Загружает данные из HDF5 файла.
+        Выводит статистику меток в зависимости от типа целевой переменной.
+
+        Для 'win' показывает баланс классов (доля побед каждой стороны).
+        Для регрессионных типов ('score', 'time') показывает распределение каждого
+        целевого поля: среднее, минимум и максимум — этого достаточно, чтобы оценить
+        масштаб таргета и впоследствии понять качество модели относительно него.
+
+        Args:
+            labels_all (np.ndarray): Метки выборки, (N,) или (N, число_полей)
+            target (str): Тип целевой переменной
+        """
+
+        total = labels_all.shape[0]
+        print_info_line("Всего матчей", f"{total:,}", "🎮",
+                        Colors.BLUE_3, Colors.BRIGHT_WHITE)
+
+        # Бинарная классификация: показываем баланс классов
+        if target == 'win':
+            radiant_wins = int(np.sum(labels_all))
+            dire_wins = total - radiant_wins
+            radiant_win_rate = (radiant_wins / total) * 100 if total else 0.0
+            print_info_line("Побед Radiant", f"{radiant_wins:,} ({radiant_win_rate:.1f}%)", "🌞",
+                            Colors.BLUE_3, Colors.GOLD_3)
+            print_info_line("Побед Dire", f"{dire_wins:,} ({100 - radiant_win_rate:.1f}%)", "🌑",
+                            Colors.BLUE_3, Colors.BRIGHT_PURPLE)
+            return
+
+        # Регрессия: распределение по каждому целевому полю
+        # reshape к 2D даёт единый перебор столбцов и для (N,), и для (N, K)
+        fields = TARGET_FIELDS[target]
+        columns = labels_all.reshape(total, -1)
+        for col_idx, field in enumerate(fields):
+            col = columns[:, col_idx]
+            col_stats = f"среднее {col.mean():.1f} | мин {col.min():.0f} | макс {col.max():.0f}"
+            print_info_line(field, col_stats, "📊",
+                            Colors.BLUE_3, Colors.BRIGHT_CYAN)
+
+    def load_data_from_hdf5(self,
+                            hdf5_path: str,
+                            target: str) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
+        """
+        Загружает данные из HDF5 файла под выбранный тип модели.
 
         Предполагается, что HDF5 файл содержит предобработанные плотные индексы
+        героев и все целевые поля. Признаки читаются всегда одни и те же, а метки
+        собираются из полей, заданных типом target.
 
         Args:
             hdf5_path (str): Путь к HDF5 файлу с данными
+            target (str): Тип целевой переменной ('win', 'score' или 'time')
 
         Returns:
             Tuple[Dict[str, np.ndarray], np.ndarray]:
                 - features: {'radiant_heroes': (N, 5), 'dire_heroes': (N, 5)}, dtype int32
-                - labels: shape (N,), dtype float32
+                - labels: (N,) для одного поля или (N, K) для нескольких, dtype float32
 
         Raises:
+            ValueError: Если target неизвестен или HDF5 файл не содержит данных
             FileNotFoundError: Если HDF5 файл не найден
-            OSError: Если не удается получить доступ к файлу
-            ValueError: Если HDF5 файл не содержит данных
+            OSError: Если не удаётся получить доступ к файлу
         """
+
+        fields = self._resolve_target_fields(target)
 
         print_subsection_header("Загрузка данных из HDF5", "📂", Colors.BLUE_2)
         print_info_line("Полный путь", hdf5_path, "📂",
                         Colors.BLUE_3, Colors.AMBER_4)
         print_info_line("Название файла", Path(hdf5_path).name, "🗃️",
                         Colors.BLUE_3, Colors.BRIGHT_GREEN)
+        print_info_line("Тип модели", target, "🎯",
+                        Colors.BLUE_3, Colors.BRIGHT_YELLOW)
 
         try:
             with h5py.File(hdf5_path, 'r') as h5_file:
                 radiant_all = h5_file['radiant_heroes'][:].astype(np.int32)
                 dire_all = h5_file['dire_heroes'][:].astype(np.int32)
-                labels_all = h5_file['radiant_win'][:].astype(np.float32)
+                # Каждое целевое поле читается отдельным столбцом
+                target_columns = [h5_file[field][:].astype(np.float32) for field in fields]
         except FileNotFoundError:
             raise FileNotFoundError(f"HDF5 файл не найден: {hdf5_path}")
         except OSError as e:
@@ -170,23 +259,16 @@ class DataLoaderWinV1:
         if total_matches == 0:
             raise ValueError("HDF5 файл не содержит данных")
 
-        # Статистика
-        radiant_wins = float(np.sum(labels_all))
-        dire_wins = total_matches - radiant_wins
-        radiant_win_rate = (radiant_wins / total_matches) * 100
+        # Один столбец → (N,), несколько → (N, K)
+        labels_all = target_columns[0] if len(target_columns) == 1 else np.stack(target_columns, axis=1)
 
-        print_info_line("Всего матчей", f"{total_matches:,}", "🎮",
-                        Colors.BLUE_3, Colors.BRIGHT_WHITE)
-        print_info_line("Побед Radiant", f"{int(radiant_wins):,} ({radiant_win_rate:.1f}%)", "🌞",
-                        Colors.BLUE_3, Colors.GOLD_3)
-        print_info_line("Побед Dire", f"{int(dire_wins):,} ({100 - radiant_win_rate:.1f}%)", "🌑",
-                        Colors.BLUE_3, Colors.BRIGHT_PURPLE)
+        # Статистика меток и размерности признаков
+        self._print_target_statistics(labels_all, target)
         print_info_line("Размерность Radiant", f"{radiant_all.shape}", "📐",
                         Colors.BLUE_3, Colors.BLUE_4)
         print_info_line("Размерность Dire", f"{dire_all.shape}", "📐",
                         Colors.BLUE_3, Colors.BLUE_4)
 
-        # Формирование Dict формата
         features = {
             'radiant_heroes': radiant_all,
             'dire_heroes': dire_all
@@ -229,38 +311,45 @@ class DataLoaderWinV1:
         return players_by_match
 
     def load_data_from_db(self,
+                          target: str,
                           limit: Optional[int] = None,
                           league_ids: Optional[Set[int]] = None) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
         """
-        Загружает данные из БД профессиональных матчей и приводит к Dict формату.
+        Загружает данные из БД профессиональных матчей под выбранный тип модели.
 
         Сначала выбираются сами матчи (с опциональным фильтром по лигам и лимитом),
         затем игроки всех матчей загружаются единым батчевым запросом через
-        _fetch_players_by_match, и наконец валидный состав каждого матча конвертируется
-        hero_id → плотные индексы. Зеркален load_data_from_hdf5:
-        считает и выводит статистику по фактически загруженным матчам.
+        _fetch_players_by_match, и валидный состав каждого матча конвертируется
+        hero_id → плотные индексы. Целевые поля читаются прямо из записи матча по
+        именам из TARGET_FIELDS.
 
         Args:
             limit (Optional[int]): Максимум матчей в выборке (None = все).
                 Из-за отсева невалидных матчей загружено может быть чуть меньше.
             league_ids (Optional[Set[int]]): Фильтр по лигам (пустое/None = все).
+            target (str): Тип целевой переменной ('win', 'score' или 'time')
 
         Returns:
             Tuple[Dict[str, np.ndarray], np.ndarray]:
                 - features: {'radiant_heroes': (N, 5), 'dire_heroes': (N, 5)}, dtype int32
-                - labels: shape (N,), dtype float32
+                - labels: (N,) для одного поля или (N, K) для нескольких, dtype float32
 
         Raises:
-            ValueError: Если из БД не получено ни одного валидного матча.
+            ValueError: Если target неизвестен или из БД не получено ни одного
+                валидного матча.
 
         Note:
             Матч пропускается со счётчиком, если в нём не 10 игроков, состав не
             бьётся по TEAM_SIZE на команду, либо встречается hero_id вне маппера
             (исключённый/новый герой). Ошибки БД (SQLAlchemyError) пробрасываются
-            наверх — их ловит общий обработчик в test, как и для HDF5.
+            наверх — их ловит общий обработчик у вызывающего кода.
         """
 
+        fields = self._resolve_target_fields(target)
+
         print_subsection_header("Загрузка данных из БД", "📂", Colors.BLUE_2)
+        print_info_line("Тип цели", target, "🎯",
+                        Colors.BLUE_3, Colors.BRIGHT_YELLOW)
 
         session = SessionLocal()
         try:
@@ -304,8 +393,7 @@ class DataLoaderWinV1:
                     skipped_count += 1
                     continue
 
-                # hero_id → плотные индексы; матч с неизвестным героем пропускаем,
-                # а не роняем весь прогон (раньше это бросало ValueError наружу)
+                # hero_id → плотные индексы; матч с неизвестным героем пропускаем
                 try:
                     radiant_indices = self._process_team_heroes(radiant_heroes, from_ids=True)
                     dire_indices = self._process_team_heroes(dire_heroes, from_ids=True)
@@ -313,9 +401,13 @@ class DataLoaderWinV1:
                     skipped_count += 1
                     continue
 
+                # Целевые поля берём прямо из записи матча по именам из TARGET_FIELDS.
+                # Один источник имён для БД и HDF5 исключает рассинхрон полей.
+                target_values = [float(getattr(match, field)) for field in fields]
+
                 radiant_features.append(radiant_indices)
                 dire_features.append(dire_indices)
-                labels.append(float(match.radiant_win))
+                labels.append(target_values[0] if len(fields) == 1 else target_values)
         finally:
             session.close()
 
@@ -325,28 +417,20 @@ class DataLoaderWinV1:
 
         radiant_all = np.array(radiant_features, dtype=np.int32)
         dire_all = np.array(dire_features, dtype=np.int32)
+        # np.array сам даёт (N,) для скаляров и (N, K) для списков значений
         labels_all = np.array(labels, dtype=np.float32)
-
-        # Статистика по фактически загруженным матчам (как в load_data_from_hdf5)
-        radiant_wins = np.sum(labels_all)
-        dire_wins = total_matches - radiant_wins
-        radiant_win_rate = (radiant_wins / total_matches) * 100
 
         if skipped_count > 0:
             print_info_line("Пропущено матчей", f"{skipped_count:,}", "⚠️",
                             Colors.BLUE_3, Colors.BRIGHT_ORANGE)
-        print_info_line("Всего матчей", f"{total_matches:,}", "🎮",
-                        Colors.BLUE_3, Colors.BRIGHT_WHITE)
-        print_info_line("Побед Radiant", f"{int(radiant_wins):,} ({radiant_win_rate:.1f}%)", "🌞",
-                        Colors.BLUE_3, Colors.GOLD_3)
-        print_info_line("Побед Dire", f"{int(dire_wins):,} ({100 - radiant_win_rate:.1f}%)", "🌑",
-                        Colors.BLUE_3, Colors.BRIGHT_PURPLE)
+
+        # Статистика меток и размерности признаков
+        self._print_target_statistics(labels_all, target)
         print_info_line("Размерность Radiant", f"{radiant_all.shape}", "📐",
                         Colors.BLUE_3, Colors.BLUE_4)
         print_info_line("Размерность Dire", f"{dire_all.shape}", "📐",
                         Colors.BLUE_3, Colors.BLUE_4)
 
-        # Формирование Dict формата
         features = {
             'radiant_heroes': radiant_all,
             'dire_heroes': dire_all

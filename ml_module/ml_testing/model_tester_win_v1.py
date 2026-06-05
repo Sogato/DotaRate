@@ -46,7 +46,7 @@ from keras.models import load_model
 from sklearn.metrics import roc_auc_score
 
 # Локальные импорты
-from ml_training.data_loader_win_v1 import DataLoaderWinV1
+from ml_training.data_loader_v1 import DataLoaderV1
 from config import DOTA_VERSION
 from utils.console import (
     Colors,
@@ -62,7 +62,7 @@ HDF5_FILENAME = "HDF5_dataset_{version}_test.h5"    # Имя HDF5 файла с 
 MODEL_FILENAME = "model_win_v1_{version}.keras"     # Базовое имя моделей (суффикс _fold_N в именах фолдов)
 
 # === КОНСТАНТЫ СТРУКТУРЫ ХРАНЕНИЯ ===
-MODEL_TYPE = "win"                                      # Тип модели
+MODEL_TYPE = "win"                                      # Тип модели (служит и типом цели для loader)
 MODEL_VERSION = "v1"                                    # Версия модели данного типа
 RUN_DIR_PREFIX = "run_"                                 # Префикс папки прогона
 RUN_DIR_PATTERN = re.compile(r"run_(\d+)(?:_.*)?$")     # Папка прогона: run_<номер> с опциональной меткой
@@ -81,12 +81,12 @@ class ModelTesterWinV1:
 
     Класс управляет полным циклом оценки: адаптивное обнаружение моделей фолдов,
     загрузка ансамбля, приведение источника (БД или HDF5) к единому Dict формату
-    через DataLoaderWinV1, получение предсказаний по каждой модели, усреднение
+    через DataLoaderV1, получение предсказаний по каждой модели, усреднение
     в ансамбль (soft-voting) и расчёт метрик ансамбля, метрик отдельных моделей
     и сравнения с baseline мажоритарного класса.
 
     Attributes:
-        loader (DataLoaderWinV1): Загрузчик данных
+        loader (DataLoaderV1): Загрузчик данных
         batch_size (int): Размер батча для предсказаний
         max_matches (Optional[int]): Лимит матчей для БД (None = все)
         league_ids (Set[int]): Фильтр по ID лиг для БД (пустое множество = все лиги)
@@ -112,7 +112,7 @@ class ModelTesterWinV1:
                 (None → DEFAULT_CONFIDENCE_THRESHOLDS)
         """
 
-        self.loader = DataLoaderWinV1()
+        self.loader = DataLoaderV1()
 
         # Параметры тестирования
         self.batch_size = batch_size
@@ -345,7 +345,9 @@ class ModelTesterWinV1:
         Загружает тестовые данные выбранного источника в единый Dict формат.
 
         Доступ к источнику (БД или HDF5) полностью инкапсулирован в загрузчике,
-        обе ветки возвращают единый Dict формат признаков и метки.
+        обе ветки возвращают единый Dict формат признаков и метки. Тип целевой
+        переменной задаётся MODEL_TYPE — он же определяет, какие поля загрузчик
+        читает как метки.
 
         Args:
             data_source (str): Источник данных ('db' или 'hdf5')
@@ -357,10 +359,11 @@ class ModelTesterWinV1:
 
         if data_source == 'db':
             return self.loader.load_data_from_db(
+                target=MODEL_TYPE,
                 limit=self.max_matches,
                 league_ids=self.league_ids
             )
-        return self.loader.load_data_from_hdf5(hdf5_path)
+        return self.loader.load_data_from_hdf5(hdf5_path, target=MODEL_TYPE)
 
     def _get_model_predictions(self, models: List, features: Dict[str, np.ndarray]) -> np.ndarray:
         """

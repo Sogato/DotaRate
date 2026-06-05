@@ -63,7 +63,7 @@ from keras.utils import set_random_seed
 from sklearn.model_selection import StratifiedKFold
 
 # Локальные импорты
-from ml_training.data_loader_win_v1 import DataLoaderWinV1
+from ml_training.data_loader_v1 import DataLoaderV1
 from config import DOTA_VERSION, TEAM_SIZE
 from utils.console import (
     Colors,
@@ -78,7 +78,7 @@ HDF5_FILENAME = "HDF5_dataset_{version}_main.h5"    # Имя HDF5 файла с 
 MODEL_FILENAME = "model_win_v1_{version}.keras"     # Базовое имя сохраняемой модели
 
 # === КОНСТАНТЫ СТРУКТУРЫ ХРАНЕНИЯ ===
-MODEL_TYPE = "win"                                      # Тип модели
+MODEL_TYPE = "win"                                      # Тип модели (служит и типом цели для loader)
 MODEL_VERSION = "v1"                                    # Версия модели данного типа
 RUN_DIR_PREFIX = "run_"                                 # Префикс папки прогона
 RUN_DIR_PATTERN = re.compile(r"run_(\d+)(?:_.*)?$")     # Папка прогона: run_<номер> с опциональной меткой
@@ -115,12 +115,12 @@ class ModelTrainerWinV1:
     """
     Координатор обучения ансамбля моделей Win v1 с K-fold кросс-валидацией.
 
-    Класс управляет полным циклом обучения: загрузка данных через DataLoaderWinV1,
+    Класс управляет полным циклом обучения: загрузка данных через DataLoaderV1,
     разбиение на фолды, создание архитектуры, компиляция, обучение отдельных моделей
     и сбор итоговой статистики по всем фолдам.
 
     Attributes:
-        loader (DataLoaderWinV1): Загрузчик данных
+        loader (DataLoaderV1): Загрузчик данных
         batch_size (int): Размер батча при обучении
         epochs (int): Максимальное количество эпох
         learning_rate (float): Начальная скорость обучения
@@ -154,7 +154,7 @@ class ModelTrainerWinV1:
             l2_reg (float): Коэффициент L2 регуляризации
         """
 
-        self.loader = DataLoaderWinV1()
+        self.loader = DataLoaderV1()
 
         # Параметры обучения
         self.batch_size = batch_size
@@ -171,7 +171,7 @@ class ModelTrainerWinV1:
 
         Последовательность действий:
         1. Фиксация сида (RANDOM_SEED) для всех источников случайности
-        2. Загрузка данных из HDF5 файла (в Dict формате)
+        2. Загрузка данных из HDF5 файла (в Dict формате) под целевую переменную win
         3. Разбиение на N_FOLDS стратифицированных фолдов
         4. Обучение отдельной модели на каждом фолде
         5. Сохранение каждой модели с суффиксом _fold_N
@@ -196,8 +196,8 @@ class ModelTrainerWinV1:
             # Вывод конфигурации
             self._print_model_configuration()
 
-            # Загрузка данных напрямую через DataLoader
-            features_all, labels_all = self.loader.load_data_from_hdf5(data_file_path)
+            # Загрузка данных напрямую через DataLoader под целевую переменную (MODEL_TYPE)
+            features_all, labels_all = self.loader.load_data_from_hdf5(data_file_path, target=MODEL_TYPE)
 
             # Инициализация кросс-валидации (разбиение завязано на тот же RANDOM_SEED)
             total_samples = features_all['radiant_heroes'].shape[0]
