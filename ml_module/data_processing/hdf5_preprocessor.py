@@ -30,6 +30,8 @@
 - Обеспечивает консистентное исключение героев на всех этапах обработки
 - Создает два независимых HDF5 файла для гибкости использования
 - Включает детальную валидацию с проверкой целостности данных
+- Гарантирует детерминированное выравнивание полей игрока (heroes/variants/roles)
+  за счёт упорядочивания агрегатов по hero_id на уровне SQL
 """
 
 # Стандартные библиотеки
@@ -41,6 +43,7 @@ from typing import Any, Dict, List, Tuple
 import h5py
 import numpy as np
 from sqlalchemy import create_engine, func, select
+from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.orm import sessionmaker
 
 # Локальные импорты
@@ -321,6 +324,17 @@ class HDF5Preprocessor:
             Функция использует PostgreSQL array_agg для эффективной агрегации
             данных игроков. Фильтрация по team_number происходит на уровне SQL
             для минимизации объема передаваемых данных.
+
+            Все шесть агрегатов упорядочены по hero_id через aggregate_order_by с
+            одним и тем же ключом. Это гарантирует выравнивание полей одного игрока:
+            i-е элементы heroes/variants/roles внутри команды всегда относятся к
+            одному и тому же игроку (а не полагаются на недетерминированный порядок
+            строк планировщика Postgres). Дополнительно фиксированный ключ делает
+            порядок строк в файле воспроизводимым между прогонами. hero_id выбран
+            ключом, так как уникален внутри матча (валидатор гарантирует 10
+            уникальных героев) и уже присутствует в данных. Семантика драфт-порядка
+            (player_slot) при этом не сохраняется — при необходимости её нужно писать
+            отдельным датасетом.
         """
         chunk_data = []
 
@@ -339,20 +353,27 @@ class HDF5Preprocessor:
                     Match.tower_status_dire,
                     Match.barracks_status_radiant,
                     Match.barracks_status_dire,
-                    # Агрегация героев по командам через array_agg
-                    func.array_agg(MatchPlayer.hero_id).filter(MatchPlayer.team_number == RADIANT_INDEX).label(
-                        "radiant_heroes"),
-                    func.array_agg(MatchPlayer.hero_id).filter(MatchPlayer.team_number == DIRE_INDEX).label(
-                        "dire_heroes"),
-                    # Агрегация вариантов героев по командам
-                    func.array_agg(MatchPlayer.hero_variant).filter(MatchPlayer.team_number == RADIANT_INDEX).label(
-                        "radiant_variants"),
-                    func.array_agg(MatchPlayer.hero_variant).filter(MatchPlayer.team_number == DIRE_INDEX).label(
-                        "dire_variants"),
-                    # Агрегация ролей игроков по командам
-                    func.array_agg(MatchPlayer.role).filter(MatchPlayer.team_number == RADIANT_INDEX).label(
-                        "radiant_roles"),
-                    func.array_agg(MatchPlayer.role).filter(MatchPlayer.team_number == DIRE_INDEX).label("dire_roles"),
+                    # Агрегация героев по командам через array_agg (порядок по hero_id)
+                    func.array_agg(
+                        aggregate_order_by(MatchPlayer.hero_id, MatchPlayer.hero_id)
+                    ).filter(MatchPlayer.team_number == RADIANT_INDEX).label("radiant_heroes"),
+                    func.array_agg(
+                        aggregate_order_by(MatchPlayer.hero_id, MatchPlayer.hero_id)
+                    ).filter(MatchPlayer.team_number == DIRE_INDEX).label("dire_heroes"),
+                    # Агрегация вариантов героев по командам (тот же ключ порядка — hero_id)
+                    func.array_agg(
+                        aggregate_order_by(MatchPlayer.hero_variant, MatchPlayer.hero_id)
+                    ).filter(MatchPlayer.team_number == RADIANT_INDEX).label("radiant_variants"),
+                    func.array_agg(
+                        aggregate_order_by(MatchPlayer.hero_variant, MatchPlayer.hero_id)
+                    ).filter(MatchPlayer.team_number == DIRE_INDEX).label("dire_variants"),
+                    # Агрегация ролей игроков по командам (тот же ключ порядка — hero_id)
+                    func.array_agg(
+                        aggregate_order_by(MatchPlayer.role, MatchPlayer.hero_id)
+                    ).filter(MatchPlayer.team_number == RADIANT_INDEX).label("radiant_roles"),
+                    func.array_agg(
+                        aggregate_order_by(MatchPlayer.role, MatchPlayer.hero_id)
+                    ).filter(MatchPlayer.team_number == DIRE_INDEX).label("dire_roles"),
                 )
                 .join(MatchPlayer, Match.match_id == MatchPlayer.match_id)
                 .filter(Match.match_id.in_(match_ids))  # Фильтрация по предоставленным ID
@@ -418,6 +439,10 @@ class HDF5Preprocessor:
         Note:
             Функция создает массивы с первым измерением равным 1 для возможности
             последующей конкатенации при пакетной записи в HDF5 датасеты.
+
+            Поэлементные list comprehension сохраняют порядок входных массивов,
+            поэтому выравнивание heroes/variants/roles, зафиксированное в
+            _load_matches_chunk, переносится в HDF5 без изменений.
         """
         # Преобразование булевого результата в целое число
         radiant_win_int = 1 if match_data['radiant_win'] else 0
