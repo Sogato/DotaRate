@@ -1,30 +1,36 @@
 """
-Модуль тестирования ансамбля моделей Win v1 предсказания исходов матчей Dota 2.
+Модуль тестирования ансамбля моделей Time v1 предсказания длительности матчей Dota 2.
 
 Модуль реализует единый сценарий оценки ансамбля из N моделей (фолдов K-fold CV):
 адаптивное обнаружение моделей, получение данных из взаимозаменяемых источников,
-приведение к единому формату признаков, усреднение предсказаний (soft-voting)
-и расчёт итоговых метрик с разбором по уровням уверенности и сравнением с baseline.
+приведение к единому формату признаков, усреднение предсказаний (soft-voting),
+разворот их в исходный масштаб (секунды) и расчёт регрессионных метрик с разбором
+ошибки по диапазонам длительности и сравнением с baseline.
 
 Ключевые особенности:
 - Источники: HDF5 файл с тестовой выборкой и БД профессиональных матчей (взаимозаменяемы)
 - Предсказания: вычисляются батчами средствами Keras для контроля потребления памяти
+- Нормализация: модели обучены в стандартизованном пространстве цели, поэтому их
+  предсказания разворачиваются обратно в секунды по сохранённым тренером параметрам
+  (mean/std из TARGET_NORM_FILENAME в папке прогона)
 
 Две оцениваемые сущности:
-- Ансамбль (soft-voting): усреднение вероятностей всех моделей.
+- Ансамбль (soft-voting): усреднение предсказаний всех моделей.
 - Отдельные модели фолдов: метрика каждой по отдельности — их разброс (mean ± std).
 
 Сценарий тестирования:
 1. Интерактивный выбор прогона (ансамбля) для тестирования
 2. Интерактивный выбор источника данных (HDF5 или БД)
 3. Адаптивное обнаружение моделей ансамбля внутри папки прогона
-4. Загрузка данных и приведение к единому Dict формату через загрузчик
-5. Получение предсказаний по каждой модели и усреднение в ансамбль
-6. Расчёт метрик ансамбля, метрик отдельных моделей и сравнение с baseline
+4. Загрузка параметров нормализации цели прогона
+5. Загрузка данных и приведение к единому Dict формату через загрузчик
+6. Получение предсказаний по каждой модели, усреднение и разворот в секунды
+7. Расчёт метрик ансамбля, метрик отдельных моделей и сравнение с baseline
 
-Метрики ансамбля считаются один раз за прогон и используются дважды: компоненты матрицы
-ошибок выводятся в начале отчёта, а основные показатели качества — в конце. Один и тот же
-прогон моделей даёт и метрики ансамбля (среднее по моделям), и метрики отдельных фолдов.
+Метрики ансамбля считаются один раз за прогон: сводка остатков выводится в начале
+отчёта, а основные показатели качества (MAE/RMSE/R²) — в конце. Baseline предсказания
+среднего считается из истинных меток тестовой выборки и доступен одинаково для обоих
+источников данных.
 
 Структура хранения моделей:
 Модели лежат в папках прогонов, созданных тренером:
@@ -35,15 +41,16 @@ import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 
 # Стандартные библиотеки
+import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Сторонние библиотеки
 import numpy as np
 from keras.models import load_model
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import r2_score
 
 # Локальные импорты
 from ml_training.data_loader_v1 import DataLoaderV1
@@ -59,10 +66,11 @@ from utils.console import (
 
 # === КОНСТАНТЫ ФАЙЛОВ ===
 HDF5_FILENAME = "HDF5_dataset_{version}_test.h5"    # Имя HDF5 файла с тестовой выборкой
-MODEL_FILENAME = "model_win_v1_{version}.keras"     # Базовое имя моделей (суффикс _fold_N в именах фолдов)
+MODEL_FILENAME = "model_time_v1_{version}.keras"    # Базовое имя моделей (суффикс _fold_N в именах фолдов)
+TARGET_NORM_FILENAME = "target_norm.json"           # Файл параметров нормализации цели (рядом с моделями)
 
 # === КОНСТАНТЫ СТРУКТУРЫ ХРАНЕНИЯ ===
-MODEL_TYPE = "win"                                      # Тип модели (служит и типом цели для loader)
+MODEL_TYPE = "time"                                     # Тип модели (служит и типом цели загрузчика)
 MODEL_VERSION = "v1"                                    # Версия модели данного типа
 RUN_DIR_PREFIX = "run_"                                 # Префикс папки прогона
 RUN_DIR_PATTERN = re.compile(r"run_(\d+)(?:_.*)?$")     # Папка прогона: run_<номер> с опциональной меткой
@@ -72,32 +80,35 @@ DEFAULT_LEAGUE_IDS: Set[int] = set()        # Фильтр по ID лиг для
 DEFAULT_MAX_MATCHES = 10_000                # Лимит матчей при тестировании на БД (None = все)
 DEFAULT_BATCH_SIZE = 256                    # Размер батча для предсказаний
 
-DEFAULT_CONFIDENCE_THRESHOLDS = [0.5, 0.55, 0.6, 0.65, 0.7] # Пороги уверенности для анализа точности предсказаний ансамбля.
+DEFAULT_DURATION_BUCKETS_MIN = [30, 40, 50] # Границы диапазонов длительности (минуты) для разбора ошибки
 
 
-class ModelTesterWinV1:
+class ModelTesterTimeV1:
     """
-    Координатор тестирования ансамбля моделей Win v1.
+    Координатор тестирования ансамбля моделей Time v1.
 
     Класс управляет полным циклом оценки: адаптивное обнаружение моделей фолдов,
-    загрузка ансамбля, приведение источника (БД или HDF5) к единому Dict формату
-    через DataLoaderV1, получение предсказаний по каждой модели, усреднение
-    в ансамбль (soft-voting) и расчёт метрик ансамбля, метрик отдельных моделей
-    и сравнения с baseline мажоритарного класса.
+    загрузка параметров нормализации и самого ансамбля, приведение источника
+    (БД или HDF5) к единому Dict формату через DataLoaderV1, получение предсказаний
+    по каждой модели, усреднение в ансамбль (soft-voting), разворот в секунды и
+    расчёт регрессионных метрик ансамбля, метрик отдельных моделей и сравнения
+    с baseline предсказания среднего.
 
     Attributes:
         loader (DataLoaderV1): Загрузчик данных
         batch_size (int): Размер батча для предсказаний
         max_matches (Optional[int]): Лимит матчей для БД (None = все)
         league_ids (Set[int]): Фильтр по ID лиг для БД (пустое множество = все лиги)
-        confidence_thresholds (List[float]): Пороги уверенности для анализа точности
+        duration_buckets_min (List[int]): Границы диапазонов длительности (минуты)
+        target_mean (float): Среднее цели из параметров нормализации прогона
+        target_std (float): Стандартное отклонение цели из параметров нормализации
     """
 
     def __init__(self,
                  batch_size: int = DEFAULT_BATCH_SIZE,
                  max_matches: Optional[int] = DEFAULT_MAX_MATCHES,
                  league_ids: Optional[Set[int]] = None,
-                 confidence_thresholds: Optional[List[float]] = None):
+                 duration_buckets_min: Optional[List[int]] = None):
         """
         Инициализирует тестер с заданной конфигурацией.
 
@@ -108,8 +119,8 @@ class ModelTesterWinV1:
             max_matches (Optional[int]): Лимит матчей для БД (None = все)
             league_ids (Optional[Set[int]]): Фильтр по лигам для БД
                 (None → все лиги, пустое множество)
-            confidence_thresholds (Optional[List[float]]): Пороги уверенности
-                (None → DEFAULT_CONFIDENCE_THRESHOLDS)
+            duration_buckets_min (Optional[List[int]]): Границы диапазонов длительности
+                (None → DEFAULT_DURATION_BUCKETS_MIN)
         """
 
         self.loader = DataLoaderV1()
@@ -118,10 +129,14 @@ class ModelTesterWinV1:
         self.batch_size = batch_size
         self.max_matches = max_matches
         self.league_ids = league_ids if league_ids is not None else set(DEFAULT_LEAGUE_IDS)
-        self.confidence_thresholds = (
-            confidence_thresholds if confidence_thresholds is not None
-            else DEFAULT_CONFIDENCE_THRESHOLDS.copy()
+        self.duration_buckets_min = (
+            duration_buckets_min if duration_buckets_min is not None
+            else DEFAULT_DURATION_BUCKETS_MIN.copy()
         )
+
+        # Параметры нормализации цели загружаются из прогона в test()
+        self.target_mean = 0.0
+        self.target_std = 1.0
 
     def test(self,
              model_base_path: str,
@@ -132,14 +147,15 @@ class ModelTesterWinV1:
 
         Последовательность действий:
         1. Адаптивное обнаружение моделей ансамбля по шаблону имени фолдов
-        2. Загрузка моделей и приведение источника (БД или HDF5) к единому формату
-        3. Получение предсказаний по каждой модели и усреднение в ансамбль
-        4. Расчёт метрик ансамбля, метрик отдельных моделей и сравнение с baseline
+        2. Загрузка параметров нормализации цели прогона
+        3. Загрузка моделей и приведение источника (БД или HDF5) к единому формату
+        4. Получение предсказаний по каждой модели, усреднение и разворот в секунды
+        5. Расчёт метрик ансамбля, метрик отдельных моделей и сравнение с baseline
 
-        Метрики ансамбля рассчитываются один раз: компоненты матрицы ошибок выводятся
-        в начале отчёта, а основные показатели качества — в конце. Baseline мажоритарного
-        класса считается из истинных меток тестовой выборки и доступен одинаково для
-        обоих источников данных.
+        Метрики ансамбля рассчитываются один раз: сводка остатков выводится в начале
+        отчёта, а основные показатели качества — в конце. Baseline предсказания среднего
+        считается из истинных меток тестовой выборки и доступен одинаково для обоих
+        источников данных.
 
         Args:
             model_base_path (str): Базовый путь к моделям внутри папки прогона;
@@ -149,12 +165,12 @@ class ModelTesterWinV1:
 
         Returns:
             Dict[str, Any]: Результаты тестирования. При успехе содержит метрики
-                ансамбля, метрики отдельных моделей, анализ уверенности, baseline
+                ансамбля, метрики отдельных моделей, разбор по диапазонам, baseline
                 и метаданные; при ошибке — {'success': False, 'error': ...}
         """
 
         # Формирование заголовка с учётом источника и фильтра лиг
-        title = f"ТЕСТИРОВАНИЕ АНСАМБЛЯ НА {'БАЗЕ ДАННЫХ' if data_source == 'db' else 'HDF5'}"
+        title = f"ТЕСТИРОВАНИЕ АНСАМБЛЯ (TIME) НА {'БАЗЕ ДАННЫХ' if data_source == 'db' else 'HDF5'}"
         if data_source == 'db' and self.league_ids:
             leagues_str = ", ".join(map(str, sorted(self.league_ids)))
             title += f" (ЛИГИ {leagues_str})"
@@ -177,13 +193,26 @@ class ModelTesterWinV1:
             print_info_line("Найдено моделей в ансамбле", f"{len(model_paths)}", "🤖",
                             Colors.BLUE_3, Colors.BRIGHT_GREEN)
 
+            # Загрузка параметров нормализации цели (нужны для разворота предсказаний)
+            normalization = self._load_target_normalization(model_base_path)
+            if normalization is None:
+                norm_path = Path(model_base_path).parent / TARGET_NORM_FILENAME
+                error_msg = f"Не найдены параметры нормализации: {norm_path}"
+                print_status_message(error_msg, "error", "❌")
+                return {'success': False, 'error': error_msg}
+
+            self.target_mean, self.target_std = normalization
+            print_info_line("Нормализация цели",
+                            f"mean {self.target_mean / 60:.1f} мин / std {self.target_std / 60:.1f} мин",
+                            "📊", Colors.BLUE_3, Colors.BRIGHT_CYAN)
+
             # Ранняя проверка наличия HDF5 файла до загрузки моделей
             if data_source == 'hdf5' and (not hdf5_path or not Path(hdf5_path).exists()):
                 error_msg = f"HDF5 файл не найден: {hdf5_path}"
                 print_status_message(error_msg, "error", "❌")
                 return {'success': False, 'error': error_msg}
 
-            print_info_line("Win v1 Data Loader инициализирован",
+            print_info_line("Time v1 Data Loader инициализирован",
                             f"Героев для модели: {self.loader.hero_mapper.total_heroes}",
                             "🧙‍♂️", Colors.BLUE_3, Colors.BRIGHT_GREEN)
 
@@ -193,16 +222,17 @@ class ModelTesterWinV1:
             # Подготовка данных выбранного источника
             features, true_labels = self._load_test_data(data_source, hdf5_path)
 
-            # Баланс классов тестовой выборки
-            test_radiant_rate = float(true_labels.mean())
-            print_info_line("Баланс выборки",
-                            f"Radiant {test_radiant_rate:.1%} / Dire {1 - test_radiant_rate:.1%}",
-                            "⚖️", Colors.BLUE_3, Colors.BRIGHT_CYAN)
+            # Распределение длительности тестовой выборки
+            print_info_line("Длительность теста",
+                            f"среднее {true_labels.mean() / 60:.1f} мин / "
+                            f"диапазон {true_labels.min() / 60:.1f}–{true_labels.max() / 60:.1f} мин",
+                            "⏱️", Colors.BLUE_3, Colors.BRIGHT_CYAN)
 
-            # Получение предсказаний по каждой модели; ансамбль = среднее по моделям
+            # Предсказания каждой модели (в нормированном пространстве); ансамбль = среднее
             print_subsection_header("Получение предсказаний", "🔮", Colors.BRIGHT_CYAN)
-            model_predictions = self._get_model_predictions(models, features)
-            ensemble_predictions = model_predictions.mean(axis=0)
+            model_predictions_norm = self._get_model_predictions(models, features)
+            # Разворот усреднённого предсказания в секунды
+            ensemble_predictions = self._denormalize(model_predictions_norm.mean(axis=0))
 
             print_info_line("Обработано матчей", f"{ensemble_predictions.shape[0]:,}", "📊",
                             Colors.BLUE_3, Colors.BRIGHT_GREEN)
@@ -211,23 +241,23 @@ class ModelTesterWinV1:
             # Метрики ансамбля рассчитываются один раз
             metrics = self._calculate_metrics(ensemble_predictions, true_labels)
 
-            # Матрица ошибок ансамбля (Radiant = положительный класс)
-            print_subsection_header("Матрица ошибок", "📊", Colors.BRIGHT_BLUE)
-            self._print_confusion_matrix(metrics)
+            # Сводка остатков (систематическое смещение, попадание в окно)
+            print_subsection_header("Сводка ошибок", "📊", Colors.BRIGHT_BLUE)
+            self._print_error_summary(metrics)
 
             # Метрики каждой модели по отдельности
             per_model_metrics = self._print_per_model_metrics(
-                model_paths, model_predictions, true_labels
+                model_paths, model_predictions_norm, true_labels
             )
 
-            # Точность по уровням уверенности ансамбля
-            print_subsection_header("Точность по уровням уверенности", "🎲", Colors.BRIGHT_GOLD)
-            confidence_analysis = self._analyze_confidence_accuracy(ensemble_predictions, true_labels)
-            self._print_confidence_table(confidence_analysis)
+            # Ошибка по диапазонам длительности
+            print_subsection_header("Ошибка по диапазонам длительности", "🎲", Colors.BRIGHT_GOLD)
+            range_analysis = self._analyze_error_by_range(ensemble_predictions, true_labels)
+            self._print_error_by_range_table(range_analysis)
 
-            # Сравнение с baseline мажоритарного класса
+            # Сравнение с baseline предсказания среднего
             print_subsection_header("Сравнение с baseline", "⚖️", Colors.BRIGHT_ORANGE)
-            baseline_comparison = self._print_baseline_comparison(metrics, test_radiant_rate)
+            baseline_comparison = self._print_baseline_comparison(metrics, true_labels)
 
             # Средние метрики по моделям
             print_subsection_header("Средние по моделям (стабильность фолдов)", "📋", Colors.BRIGHT_CYAN)
@@ -243,10 +273,11 @@ class ModelTesterWinV1:
                 'model_paths': model_paths,
                 'data_source': data_source,
                 'test_samples': int(ensemble_predictions.shape[0]),
-                'test_radiant_rate': test_radiant_rate,
+                'target_mean': self.target_mean,
+                'target_std': self.target_std,
                 'metrics': metrics,
                 'per_model_metrics': per_model_metrics,
-                'confidence_analysis': confidence_analysis,
+                'range_analysis': range_analysis,
                 'baseline_comparison': baseline_comparison,
                 'league_filter': set(self.league_ids)
             }
@@ -264,6 +295,21 @@ class ModelTesterWinV1:
         finally:
             # Освобождение ресурсов маппера героев
             self.loader.hero_mapper.cleanup()
+
+    def _denormalize(self, predictions_norm: np.ndarray) -> np.ndarray:
+        """
+        Разворачивает предсказания из нормированного пространства в секунды.
+
+        Обратно к стандартизации тренера: pred_сек = pred_норм * std + mean.
+
+        Args:
+            predictions_norm (np.ndarray): Предсказания в нормированных единицах
+
+        Returns:
+            np.ndarray: Предсказания длительности в секундах
+        """
+
+        return predictions_norm * self.target_std + self.target_mean
 
     def _print_test_configuration(self, data_source: str) -> None:
         """
@@ -291,8 +337,8 @@ class ModelTesterWinV1:
             print_info_line("Фильтр лиг", leagues_label, "🏆",
                             Colors.BLUE_3, Colors.BRIGHT_PURPLE)
 
-        thresholds_label = ", ".join(f"{int(t * 100)}%" for t in self.confidence_thresholds)
-        print_info_line("Пороги уверенности", thresholds_label, "🎲",
+        buckets_label = ", ".join(f"{b}" for b in self.duration_buckets_min)
+        print_info_line("Границы диапазонов (мин)", buckets_label, "🎲",
                         Colors.BLUE_3, Colors.BRIGHT_YELLOW)
         print()
 
@@ -317,6 +363,31 @@ class ModelTesterWinV1:
             [str(p) for p in model_dir.glob(f"{model_name_prefix}*.keras")],
             key=lambda x: int(Path(x).stem.split('_fold_')[-1])  # Сортировка по номеру фолда
         )
+
+    @staticmethod
+    def _load_target_normalization(model_base_path: str) -> Optional[Tuple[float, float]]:
+        """
+        Загружает параметры нормализации цели из JSON в папке прогона.
+
+        Файл создаётся тренером рядом с моделями и хранит mean/std, которыми
+        стандартизовалась цель при обучении. Без него развернуть предсказания
+        в секунды нельзя.
+
+        Args:
+            model_base_path (str): Базовый путь к моделям (определяет папку прогона)
+
+        Returns:
+            Optional[Tuple[float, float]]: (mean, std) или None, если файла нет
+        """
+
+        norm_path = Path(model_base_path).parent / TARGET_NORM_FILENAME
+        if not norm_path.exists():
+            return None
+
+        with open(norm_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        return float(data['mean']), float(data['std'])
 
     @staticmethod
     def _load_models(model_paths: List) -> List:
@@ -346,15 +417,15 @@ class ModelTesterWinV1:
 
         Доступ к источнику (БД или HDF5) полностью инкапсулирован в загрузчике,
         обе ветки возвращают единый Dict формат признаков и метки. Тип целевой
-        переменной задаётся MODEL_TYPE — он же определяет, какие поля загрузчик
-        читает как метки.
+        переменной задаётся MODEL_TYPE — он же определяет, что загрузчик читает
+        как метки (для time это длительность в секундах).
 
         Args:
             data_source (str): Источник данных ('db' или 'hdf5')
             hdf5_path (Optional[str]): Путь к HDF5 файлу (для data_source='hdf5')
 
         Returns:
-            Tuple[Dict[str, np.ndarray], np.ndarray]: Признаки и истинные метки
+            Tuple[Dict[str, np.ndarray], np.ndarray]: Признаки и истинные метки (секунды)
         """
 
         if data_source == 'db':
@@ -369,9 +440,9 @@ class ModelTesterWinV1:
         """
         Вычисляет предсказания каждой модели ансамбля по отдельности, батчами.
 
-        Возвращает матрицу предсказаний без усреднения, чтобы вызывающий код мог
-        получить и метрики ансамбля (среднее по моделям), и метрики каждой модели
-        в отдельности за один прогон.
+        Возвращает матрицу предсказаний (в нормированном пространстве цели) без
+        усреднения, чтобы вызывающий код мог получить и метрики ансамбля (среднее
+        по моделям), и метрики каждой модели в отдельности за один прогон.
 
         Последовательность действий:
         1. Поочерёдный проход по моделям ансамбля
@@ -388,8 +459,8 @@ class ModelTesterWinV1:
             features (Dict[str, np.ndarray]): Признаки {'radiant_heroes', 'dire_heroes'}
 
         Returns:
-            np.ndarray: Матрица вероятностей победы Radiant, shape (n_models, N).
-                Усреднение по оси 0 даёт предсказание ансамбля (soft-voting).
+            np.ndarray: Матрица предсказаний длительности в нормированных единицах,
+                shape (n_models, N). Усреднение по оси 0 даёт предсказание ансамбля.
         """
 
         n_models = len(models)
@@ -413,137 +484,128 @@ class ModelTesterWinV1:
     @staticmethod
     def _calculate_metrics(predictions: np.ndarray, true_labels: np.ndarray) -> Dict[str, float]:
         """
-        Вычисляет основные метрики качества и матрицу ошибок для набора предсказаний.
+        Вычисляет регрессионные метрики качества для набора предсказаний (в секундах).
 
-        Бинаризует вероятности по порогу 0.5 (ровно 0.5 → Radiant) и считает accuracy, precision,
-        recall, F1 и компоненты матрицы ошибок. AUC вычисляется напрямую по вероятностям.
-        Применяется как к предсказаниям ансамбля, так и к предсказаниям отдельной модели.
+        Считает MAE, RMSE, R², медианную абсолютную ошибку, систематическое смещение
+        (bias = среднее pred − факт) и долю предсказаний в пределах 5 и 10 минут от
+        истины. Применяется как к предсказаниям ансамбля, так и к отдельной модели.
+        Метрики ошибки дополнительно приводятся к минутам для читаемости.
 
-        Победа Radiant (метка 1) трактуется как положительный класс: precision и recall
-        считаются относительно предсказания побед Radiant. AUC возвращает 0.0, если
-        в выборке присутствует только один класс (roc_auc_score не определён).
+        R² возвращает 0.0, если дисперсия истинных меток нулевая (метрика не определена).
 
         Args:
-            predictions (np.ndarray): Вероятности победы Radiant (диапазон 0-1)
-            true_labels (np.ndarray): Истинные метки (1 = победа Radiant, 0 = победа Dire)
+            predictions (np.ndarray): Предсказания длительности в секундах
+            true_labels (np.ndarray): Истинные метки длительности в секундах
 
         Returns:
-            Dict[str, float]: Метрики и компоненты матрицы ошибок:
-                - 'accuracy', 'precision', 'recall', 'f1_score', 'auc'
-                - 'true_positives', 'true_negatives', 'false_positives', 'false_negatives'
+            Dict[str, float]: Метрики ошибки (в секундах и минутах) и доли попаданий
         """
 
-        # Бинаризация вероятностей по порогу 0.5
-        binary_predictions = (predictions >= 0.5).astype(int)
-        accuracy = float(np.mean(binary_predictions == true_labels))
+        errors = predictions - true_labels  # знак: + переоценка, − недооценка
+        mae = float(np.mean(np.abs(errors)))
+        rmse = float(np.sqrt(np.mean(errors ** 2)))
+        median_ae = float(np.median(np.abs(errors)))
+        bias = float(np.mean(errors))
 
-        # Компоненты матрицы ошибок (Radiant = положительный класс)
-        tp = int(np.sum((binary_predictions == 1) & (true_labels == 1)))
-        tn = int(np.sum((binary_predictions == 0) & (true_labels == 0)))
-        fp = int(np.sum((binary_predictions == 1) & (true_labels == 0)))
-        fn = int(np.sum((binary_predictions == 0) & (true_labels == 1)))
+        # Доля предсказаний в пределах окна точности
+        within_5min = float(np.mean(np.abs(errors) <= 5 * 60))
+        within_10min = float(np.mean(np.abs(errors) <= 10 * 60))
 
-        # Производные метрики с защитой от деления на ноль
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-
-        # AUC по вероятностям; не определён при единственном классе в выборке
+        # R² не определён при нулевой дисперсии истинных меток
         try:
-            auc_score = float(roc_auc_score(true_labels, predictions))
+            r2 = float(r2_score(true_labels, predictions))
         except ValueError:
-            auc_score = 0.0
+            r2 = 0.0
 
         return {
-            'accuracy': accuracy,
-            'precision': precision,
-            'recall': recall,
-            'f1_score': f1_score,
-            'auc': auc_score,
-            'true_positives': int(tp),
-            'true_negatives': int(tn),
-            'false_positives': int(fp),
-            'false_negatives': int(fn)
+            'mae': mae,
+            'rmse': rmse,
+            'r2': r2,
+            'median_ae': median_ae,
+            'bias': bias,
+            'mae_min': mae / 60.0,
+            'rmse_min': rmse / 60.0,
+            'median_ae_min': median_ae / 60.0,
+            'bias_min': bias / 60.0,
+            'within_5min': within_5min,
+            'within_10min': within_10min
         }
 
-    def _analyze_confidence_accuracy(self, predictions: np.ndarray, true_labels: np.ndarray) -> Dict:
+    def _analyze_error_by_range(self, predictions: np.ndarray, true_labels: np.ndarray) -> List[Dict[str, Any]]:
         """
-        Анализирует точность предсказаний ансамбля в разрезе уровней уверенности.
+        Разбирает ошибку ансамбля по диапазонам истинной длительности.
 
-        Пороги берутся из self.confidence_thresholds. Для каждого порога выделяет
-        три группы предсказаний и считает их точность и долю от общего числа:
-        1. Уверенные за Radiant: вероятность >= threshold
-        2. Уверенные за Dire: вероятность <= (1 - threshold)
-        3. Все уверенные предсказания: объединение групп 1 и 2
+        Границы берутся из self.duration_buckets_min (минуты) и задают диапазоны:
+        до первой границы, между соседними границами и после последней. Для каждого
+        диапазона считается число матчей, их доля и средняя абсолютная ошибка (MAE).
 
-        Чем выше порог, тем меньше предсказаний попадает в уверенную группу, но тем
-        выше ожидаемая точность для хорошо откалиброванной модели.
+        Разрез показывает, где модель ошибается сильнее — обычно на хвостах
+        распределения (очень короткие и очень длинные матчи).
 
         Args:
-            predictions (np.ndarray): Вероятности победы Radiant (диапазон 0-1)
-            true_labels (np.ndarray): Истинные метки (1 = Radiant, 0 = Dire)
+            predictions (np.ndarray): Предсказания длительности в секундах
+            true_labels (np.ndarray): Истинные метки длительности в секундах
 
         Returns:
-            Dict: Анализ по каждому порогу с ключами вида 'confidence_{N}', где для
-                каждой группы указаны count, accuracy и percentage_of_total.
+            List[Dict[str, Any]]: По каждому диапазону label, count, percentage, mae_min
         """
 
-        analysis = {}
-        for threshold in self.confidence_thresholds:
-            # Группа уверенных предсказаний за Radiant
-            high_radiant_mask = predictions >= threshold
-            high_radiant_count = np.sum(high_radiant_mask)
-            high_radiant_accuracy = np.mean(true_labels[high_radiant_mask]) if high_radiant_count > 0 else 0.0
+        abs_errors = np.abs(predictions - true_labels)
+        total = len(true_labels)
 
-            # Группа уверенных предсказаний за Dire (зеркальный порог)
-            high_dire_mask = predictions <= (1 - threshold)
-            high_dire_count = np.sum(high_dire_mask)
-            high_dire_accuracy = np.mean(1 - true_labels[high_dire_mask]) if high_dire_count > 0 else 0.0
+        # Построение границ диапазонов в минутах: (None, e0), (e0, e1), ..., (e_last, None)
+        edges = sorted(self.duration_buckets_min)
+        ranges: List[Tuple[Optional[int], Optional[int]]] = []
+        prev: Optional[int] = None
+        for edge in edges:
+            ranges.append((prev, edge))
+            prev = edge
+        ranges.append((prev, None))
 
-            # Объединённая группа всех уверенных предсказаний
-            confident_mask = (predictions >= threshold) | (predictions <= (1 - threshold))
-            confident_count = np.sum(confident_mask)
-            if confident_count > 0:
-                confident_predictions = (predictions[confident_mask] >= 0.5).astype(int)
-                confident_labels = true_labels[confident_mask]
-                overall_confident_accuracy = np.mean(confident_predictions == confident_labels)
+        analysis = []
+        for low_min, high_min in ranges:
+            # Маска истинной длительности в границах диапазона (в секундах)
+            mask = np.ones(total, dtype=bool)
+            if low_min is not None:
+                mask &= true_labels >= low_min * 60
+            if high_min is not None:
+                mask &= true_labels < high_min * 60
+
+            count = int(np.sum(mask))
+            mae_min = float(np.mean(abs_errors[mask]) / 60.0) if count > 0 else 0.0
+
+            # Человекочитаемая метка диапазона
+            if low_min is None:
+                label = f"< {high_min} мин"
+            elif high_min is None:
+                label = f"≥ {low_min} мин"
             else:
-                overall_confident_accuracy = 0.0
+                label = f"{low_min}–{high_min} мин"
 
-            analysis[f"confidence_{int(threshold * 100)}"] = {
-                'threshold': threshold,
-                'radiant_confident': {
-                    'count': int(high_radiant_count),
-                    'accuracy': high_radiant_accuracy,
-                    'percentage_of_total': high_radiant_count / len(predictions) if len(predictions) > 0 else 0.0
-                },
-                'dire_confident': {
-                    'count': int(high_dire_count),
-                    'accuracy': high_dire_accuracy,
-                    'percentage_of_total': high_dire_count / len(predictions) if len(predictions) > 0 else 0.0
-                },
-                'overall_confident': {
-                    'count': int(confident_count),
-                    'accuracy': overall_confident_accuracy,
-                    'percentage_of_total': confident_count / len(predictions) if len(predictions) > 0 else 0.0
-                }
-            }
+            analysis.append({
+                'label': label,
+                'count': count,
+                'percentage': count / total if total > 0 else 0.0,
+                'mae_min': mae_min
+            })
+
         return analysis
 
     def _print_per_model_metrics(self,
                                  model_paths: List[str],
-                                 model_predictions: np.ndarray,
+                                 model_predictions_norm: np.ndarray,
                                  true_labels: np.ndarray) -> List[Dict[str, float]]:
         """
         Считает и выводит метрики каждой модели ансамбля по отдельности.
 
-        Разброс этих метрик характеризует не качество ансамбля, а стабильность
-        фолдов между собой на тестовой выборке.
+        Предсказания каждой модели разворачиваются в секунды индивидуально, после чего
+        считаются те же регрессионные метрики, что и для ансамбля. Разброс этих метрик
+        характеризует не качество ансамбля, а стабильность фолдов между собой на тесте.
 
         Args:
             model_paths (List[str]): Пути к моделям фолдов (для извлечения метки фолда)
-            model_predictions (np.ndarray): Матрица предсказаний (n_models, N)
-            true_labels (np.ndarray): Истинные метки
+            model_predictions_norm (np.ndarray): Матрица предсказаний (n_models, N) в норм. ед.
+            true_labels (np.ndarray): Истинные метки (секунды)
 
         Returns:
             List[Dict[str, float]]: Метрики по каждой модели в порядке model_paths
@@ -551,121 +613,126 @@ class ModelTesterWinV1:
 
         print_subsection_header("Метрики по моделям ансамбля", "🧩", Colors.BRIGHT_CYAN)
         per_model_metrics = []
-        for model_path, model_preds in zip(model_paths, model_predictions):
-            fold_metrics = self._calculate_metrics(model_preds, true_labels)
+        for model_path, model_preds_norm in zip(model_paths, model_predictions_norm):
+            # Разворот предсказаний конкретной модели в секунды
+            model_preds_sec = self._denormalize(model_preds_norm)
+            fold_metrics = self._calculate_metrics(model_preds_sec, true_labels)
             per_model_metrics.append(fold_metrics)
             fold_label = Path(model_path).stem.split('_fold_')[-1]
             fold_value = (
-                f"{Colors.GOLD_4}Accuracy {Colors.RESET} "
-                f"{Colors.BRIGHT_GREEN}{fold_metrics['accuracy']:.1%}{Colors.RESET}  "
-                f"{Colors.GOLD_4}AUC {Colors.RESET} "
-                f"{Colors.BRIGHT_CYAN}{fold_metrics['auc']:.1%}{Colors.RESET}  "
-                f"{Colors.GOLD_4}F1 {Colors.RESET} "
-                f"{Colors.BRIGHT_YELLOW}{fold_metrics['f1_score']:.1%}{Colors.RESET}"
+                f"{Colors.GOLD_4}MAE {Colors.RESET} "
+                f"{Colors.BRIGHT_GREEN}{fold_metrics['mae_min']:.2f}м{Colors.RESET}  "
+                f"{Colors.GOLD_4}RMSE {Colors.RESET} "
+                f"{Colors.BRIGHT_CYAN}{fold_metrics['rmse_min']:.2f}м{Colors.RESET}  "
+                f"{Colors.GOLD_4}R² {Colors.RESET} "
+                f"{Colors.BRIGHT_YELLOW}{fold_metrics['r2']:.3f}{Colors.RESET}"
             )
             print_info_line(f"Модель fold_{fold_label}", fold_value, "🔹",
                             Colors.BLUE_3, Colors.RESET)
         return per_model_metrics
 
     @staticmethod
-    def _print_confusion_matrix(metrics: Dict[str, float]) -> None:
+    def _print_error_summary(metrics: Dict[str, float]) -> None:
         """
-        Выводит матрицу ошибок построчно (Radiant = положительный класс).
+        Выводит сводку остатков ансамбля построчно.
+
+        Систематическое смещение (bias) показывает, склонна ли модель в среднем
+        завышать (+) или занижать (−) длительность. Доли попаданий в окно дают
+        практическое ощущение точности.
 
         Args:
             metrics (Dict[str, float]): Метрики ансамбля из _calculate_metrics
         """
 
-        print_info_line("Radiant угадан верно (TP)", f"{metrics['true_positives']:,}", "✅",
-                        Colors.BLUE_3, Colors.BRIGHT_GREEN)
-        print_info_line("Dire угадан верно (TN)", f"{metrics['true_negatives']:,}", "✅",
+        bias_sign = "переоценка" if metrics['bias'] >= 0 else "недооценка"
+        print_info_line("Смещение (pred − факт)", f"{metrics['bias_min']:+.2f} мин ({bias_sign})", "🧭",
+                        Colors.BLUE_3, Colors.BRIGHT_PURPLE)
+        print_info_line("Медианная ошибка", f"{metrics['median_ae_min']:.2f} мин", "📍",
                         Colors.BLUE_3, Colors.GOLD_3)
-        print_info_line("Radiant вместо Dire (FP)", f"{metrics['false_positives']:,}", "❌",
-                        Colors.BLUE_3, Colors.BRIGHT_ORANGE)
-        print_info_line("Dire вместо Radiant (FN)", f"{metrics['false_negatives']:,}", "❌",
-                        Colors.BLUE_3, Colors.BRIGHT_RED)
+        print_info_line("Точность в ±5 мин", f"{metrics['within_5min']:.1%}", "🎯",
+                        Colors.BLUE_3, Colors.BRIGHT_GREEN)
+        print_info_line("Точность в ±10 мин", f"{metrics['within_10min']:.1%}", "🎯",
+                        Colors.BLUE_3, Colors.BRIGHT_GREEN)
 
     @staticmethod
     def _print_ensemble_metrics(metrics: Dict[str, float]) -> None:
         """
         Выводит основные показатели качества ансамбля построчно.
 
-        Матрица ошибок выводится отдельно через _print_confusion_matrix.
+        Сводка остатков выводится отдельно через _print_error_summary.
 
         Args:
             metrics (Dict[str, float]): Метрики ансамбля из _calculate_metrics
         """
 
-        print_info_line("Accuracy", f"{metrics['accuracy']:.1%}", "🎯",
+        print_info_line("MAE", f"{metrics['mae_min']:.2f} мин", "🎯",
                         Colors.BLUE_3, Colors.BRIGHT_GREEN)
-        print_info_line("Precision", f"{metrics['precision']:.1%}", "🔍",
-                        Colors.BLUE_3, Colors.BRIGHT_BLUE)
-        print_info_line("Recall", f"{metrics['recall']:.1%}", "🎣",
-                        Colors.BLUE_3, Colors.BRIGHT_PURPLE)
-        print_info_line("F1-Score", f"{metrics['f1_score']:.1%}", "⚖️",
-                        Colors.BLUE_3, Colors.BRIGHT_YELLOW)
-        print_info_line("AUC", f"{metrics['auc']:.1%}", "📈",
+        print_info_line("RMSE", f"{metrics['rmse_min']:.2f} мин", "📈",
                         Colors.BLUE_3, Colors.BRIGHT_CYAN)
+        print_info_line("R²", f"{metrics['r2']:.3f}", "🔍",
+                        Colors.BLUE_3, Colors.BRIGHT_YELLOW)
 
     @staticmethod
-    def _print_confidence_table(confidence_analysis: Dict) -> None:
+    def _print_error_by_range_table(range_analysis: List[Dict[str, Any]]) -> None:
         """
-        Выводит точность по уровням уверенности построчно (одна строка на порог).
-
-        Каждая строка собирается в цветной value-стринг: счётчик уверенных предсказаний и их доля,
-        общая точность, а также точность среди уверенных предсказаний каждой стороны.
+        Выводит ошибку по диапазонам длительности построчно (одна строка на диапазон).
 
         Args:
-            confidence_analysis (Dict): Результат _analyze_confidence_accuracy
+            range_analysis (List[Dict[str, Any]]): Результат _analyze_error_by_range
         """
 
-        for conf_data in confidence_analysis.values():
-            threshold = conf_data['threshold']
-            overall = conf_data['overall_confident']
-            radiant = conf_data['radiant_confident']
-            dire = conf_data['dire_confident']
-
-            # Сборка цветного value: уверенные / точность / точность по сторонам
-            conf_value = (
-                f"{Colors.TEAL_3}Предсказаний:{Colors.RESET} "
-                f"{Colors.BRIGHT_WHITE}{overall['count']:,}{Colors.RESET} "
-                f"{Colors.DIM}({overall['percentage_of_total']:.1%}){Colors.RESET}  "
-                f"{Colors.GOLD_4}Точность:{Colors.RESET} "
-                f"{Colors.GOLD_1}{overall['accuracy']:.1%}{Colors.RESET}  "
-                f"{Colors.BRIGHT_BLUE}Radiant:{Colors.RESET} "
-                f"{Colors.BLUE_4}{radiant['accuracy']:.1%}{Colors.RESET}  "
-                f"{Colors.BRIGHT_RED}Dire:{Colors.RESET} "
-                f"{Colors.BRIGHT_ORANGE}{dire['accuracy']:.1%}{Colors.RESET}"
+        for bucket in range_analysis:
+            range_value = (
+                f"{Colors.TEAL_3}Матчей:{Colors.RESET} "
+                f"{Colors.BRIGHT_WHITE}{bucket['count']:,}{Colors.RESET} "
+                f"{Colors.DIM}({bucket['percentage']:.1%}){Colors.RESET}  "
+                f"{Colors.GOLD_4}MAE:{Colors.RESET} "
+                f"{Colors.GOLD_1}{bucket['mae_min']:.2f} мин{Colors.RESET}"
             )
-            print_info_line(f"Порог ≥{int(threshold * 100)}%", conf_value, "🎲",
+            print_info_line(bucket['label'], range_value, "🎲",
                             Colors.BLUE_3, Colors.RESET)
 
     @staticmethod
     def _print_baseline_comparison(metrics: Dict[str, float],
-                                   test_radiant_rate: float) -> Dict[str, float]:
+                                   true_labels: np.ndarray) -> Dict[str, float]:
         """
-        Считает и выводит сравнение точности ансамбля с baseline мажоритарного класса.
+        Считает и выводит сравнение ансамбля с baseline предсказания среднего.
+
+        Baseline — константное предсказание средней длительности по тестовой выборке.
+        Его MAE и RMSE задают планку «без модели»; прирост показывает, насколько
+        ансамбль снижает ошибку относительно неё. По построению R² baseline равен 0,
+        поэтому положительный R² ансамбля и означает выигрыш над этой планкой.
 
         Args:
             metrics (Dict[str, float]): Метрики ансамбля
-            test_radiant_rate (float): Доля побед Radiant в тестовой выборке
+            true_labels (np.ndarray): Истинные метки длительности (секунды)
 
         Returns:
-            Dict[str, float]: baseline_accuracy, model_improvement, improvement_percentage
+            Dict[str, float]: baseline_mae_min, baseline_rmse_min, mae_improvement, rmse_improvement
         """
 
-        majority_accuracy = max(test_radiant_rate, 1 - test_radiant_rate)
-        improvement = (metrics['accuracy'] / majority_accuracy - 1) * 100 if majority_accuracy > 0 else 0.0
+        mean_label = float(np.mean(true_labels))
+        baseline_errors = true_labels - mean_label
+        baseline_mae = float(np.mean(np.abs(baseline_errors)))
+        baseline_rmse = float(np.sqrt(np.mean(baseline_errors ** 2)))
+
+        mae_improvement = (1 - metrics['mae'] / baseline_mae) * 100 if baseline_mae > 0 else 0.0
+        rmse_improvement = (1 - metrics['rmse'] / baseline_rmse) * 100 if baseline_rmse > 0 else 0.0
+
         baseline_comparison = {
-            'baseline_accuracy': majority_accuracy,
-            'model_improvement': metrics['accuracy'] - majority_accuracy,
-            'improvement_percentage': improvement
+            'baseline_mae_min': baseline_mae / 60.0,
+            'baseline_rmse_min': baseline_rmse / 60.0,
+            'mae_improvement': mae_improvement,
+            'rmse_improvement': rmse_improvement
         }
-        print_info_line("Baseline (мажоритарный класс)", f"{majority_accuracy:.1%}", "📉",
+
+        print_info_line("Baseline MAE (среднее)", f"{baseline_mae / 60:.2f} мин", "📉",
                         Colors.BLUE_3, Colors.BRIGHT_PURPLE)
-        print_info_line("Точность ансамбля", f"{metrics['accuracy']:.1%}", "🎯",
+        print_info_line("MAE ансамбля", f"{metrics['mae_min']:.2f} мин", "🎯",
                         Colors.BLUE_3, Colors.BRIGHT_GREEN)
-        print_info_line("Прирост над baseline", f"+{baseline_comparison['model_improvement'] * 100:.1f} п.п.", "📈",
+        print_info_line("Снижение MAE", f"{mae_improvement:+.1f}%", "📈",
+                        Colors.BLUE_3, Colors.BRIGHT_GREEN)
+        print_info_line("Снижение RMSE", f"{rmse_improvement:+.1f}%", "📈",
                         Colors.BLUE_3, Colors.BRIGHT_GREEN)
         return baseline_comparison
 
@@ -678,17 +745,17 @@ class ModelTesterWinV1:
             per_model_metrics (List[Dict[str, float]]): Метрики отдельных моделей
         """
 
-        accuracies = [m['accuracy'] for m in per_model_metrics]
-        aucs = [m['auc'] for m in per_model_metrics]
-        f1_scores = [m['f1_score'] for m in per_model_metrics]
-        print_info_line("Средняя Accuracy",
-                        f"{float(np.mean(accuracies)):.1%} ± {float(np.std(accuracies)):.1%}", "🎯",
+        maes = [m['mae_min'] for m in per_model_metrics]
+        rmses = [m['rmse_min'] for m in per_model_metrics]
+        r2s = [m['r2'] for m in per_model_metrics]
+        print_info_line("Средний MAE",
+                        f"{float(np.mean(maes)):.2f} ± {float(np.std(maes)):.2f} мин", "🎯",
                         Colors.BLUE_3, Colors.BRIGHT_GREEN)
-        print_info_line("Средний AUC",
-                        f"{float(np.mean(aucs)):.1%} ± {float(np.std(aucs)):.1%}", "📈",
+        print_info_line("Средний RMSE",
+                        f"{float(np.mean(rmses)):.2f} ± {float(np.std(rmses)):.2f} мин", "📈",
                         Colors.BLUE_3, Colors.BRIGHT_CYAN)
-        print_info_line("Средний F1",
-                        f"{float(np.mean(f1_scores)):.1%} ± {float(np.std(f1_scores)):.1%}", "⚖️",
+        print_info_line("Средний R²",
+                        f"{float(np.mean(r2s)):.3f} ± {float(np.std(r2s)):.3f}", "⚖️",
                         Colors.BLUE_3, Colors.BRIGHT_YELLOW)
 
 
@@ -806,12 +873,12 @@ def print_startup_header() -> None:
     Выводит стартовый заголовок программы.
     """
 
-    print_section_header("ЗАПУСК ТЕСТИРОВАНИЯ WIN-PREDICTOR V1", "🚀", color=Colors.VIOLET_2)
-    print_info_line("Версия модели", "Win Prediction v1", "🤖",
+    print_section_header("ЗАПУСК ТЕСТИРОВАНИЯ TIME-PREDICTOR V1", "🚀", color=Colors.VIOLET_2)
+    print_info_line("Версия модели", "Time Prediction v1", "🤖",
                     Colors.BLUE_3, Colors.BRIGHT_CYAN)
     print_info_line("Тип оценки", "Ансамбль (soft-voting) фолдов", "🧪",
                     Colors.BLUE_3, Colors.BRIGHT_GREEN)
-    print_info_line("Архитектура", "Hero Embedding + MLP", "🧠",
+    print_info_line("Архитектура", "Hero Embedding + MLP (регрессия)", "🧠",
                     Colors.BLUE_3, Colors.LAVENDER)
     print_info_line("Фреймворк", "Keras (TensorFlow)", "🔧",
                     Colors.BLUE_3, Colors.GOLD_3)
@@ -841,7 +908,7 @@ def main() -> None:
     model_base_path = str(run_dir / MODEL_FILENAME.format(version=DOTA_VERSION))
 
     # Создание тестера и запуск тестирования
-    tester = ModelTesterWinV1(
+    tester = ModelTesterTimeV1(
         batch_size=DEFAULT_BATCH_SIZE,
         max_matches=DEFAULT_MAX_MATCHES,
         league_ids=DEFAULT_LEAGUE_IDS
