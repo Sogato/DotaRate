@@ -1,13 +1,13 @@
 """
-Модуль обучения модели Win v1 предсказания исходов матчей Dota 2 с K-fold кросс-валидацией.
+Модуль обучения модели Time v1 предсказания длительности матчей Dota 2 с K-fold кросс-валидацией.
 
 Модуль реализует полный цикл обучения ансамбля из N моделей (N_FOLDS):
 разбиение данных, создание архитектуры нейросети, компиляцию, обучение
 отдельных моделей и сбор итоговой статистики.
 
-Win v1 представляет собой архитектуру, основанную на условном подходе
-"bag-of-heroes" (мешок героев), где модель обучается предсказывать исход матча
-исключительно по составам команд без явного моделирования синергий или контр-пиков.
+Time v1 решает задачу регрессии: по составам команд предсказывается длительность
+матча (duration, в секундах). Архитектура "bag-of-heroes": модель оценивает длительность
+исключительно по составам, без явного моделирования синергий или контр-пиков.
 
 Ключевые особенности:
 - Вход: плотные индексы героев (5 Radiant + 5 Dire)
@@ -15,8 +15,17 @@ Win v1 представляет собой архитектуру, основа�
 - Average Pooling: агрегация через GlobalAveragePooling1D (усреднение векторов команды)
 - Представление команды: единый вектор без учёта взаимодействий между героями
 - MLP: последовательность Dense → BatchNorm → ReLU → Dropout слоёв
-- Выходной слой: sigmoid активация для вероятности победы Radiant
+- Выходной слой: linear активация (одно вещественное число)
 - Воспроизводимость: единый сид RANDOM_SEED фиксирует все источники случайности
+
+Нормализация целевой переменной:
+Длительность измеряется в секундах и имеет большой масштаб, поэтому перед обучением
+таргет стандартизуется (вычитается среднее, делится на стандартное отклонение). Модель
+обучается и предсказывает в нормированном пространстве, а параметры нормализации
+(mean/std) сохраняются рядом с моделями в TARGET_NORM_FILENAME — тестер использует их,
+чтобы развернуть предсказания обратно в секунды. Среднее и стандартное отклонение
+считаются один раз по всему обучающему набору (общие для всех фолдов); это вносит
+незначительную утечку валидационных фолдов в статистику нормализации.
 
 Архитектурные ограничения:
 - Модель не различает связи между героями (синергии внутри команды или контр-пиков между командами)
@@ -36,6 +45,7 @@ import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 
 # Стандартные библиотеки
+import json
 import re
 import sys
 import time
@@ -56,11 +66,11 @@ from keras.layers import (
     Embedding,
     GlobalAveragePooling1D,
 )
-from keras.metrics import AUC, Precision, Recall
+from keras.metrics import MeanAbsoluteError, RootMeanSquaredError
 from keras.optimizers import Adam
 from keras.regularizers import L2
 from keras.utils import set_random_seed
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import KFold
 
 # Локальные импорты
 from ml_training.data_loader_v1 import DataLoaderV1
@@ -75,10 +85,11 @@ from utils.console import (
 
 # === КОНСТАНТЫ ФАЙЛОВ ===
 HDF5_FILENAME = "HDF5_dataset_{version}_main.h5"    # Имя HDF5 файла с данными
-MODEL_FILENAME = "model_win_v1_{version}.keras"     # Базовое имя сохраняемой модели
+MODEL_FILENAME = "model_time_v1_{version}.keras"    # Базовое имя сохраняемой модели
+TARGET_NORM_FILENAME = "target_norm.json"           # Файл параметров нормализации цели (рядом с моделями)
 
 # === КОНСТАНТЫ СТРУКТУРЫ ХРАНЕНИЯ ===
-MODEL_TYPE = "win"                                      # Тип модели (служит и типом цели для loader)
+MODEL_TYPE = "time"                                     # Тип модели (служит и типом цели загрузчика)
 MODEL_VERSION = "v1"                                    # Версия модели данного типа
 RUN_DIR_PREFIX = "run_"                                 # Префикс папки прогона
 RUN_DIR_PATTERN = re.compile(r"run_(\d+)(?:_.*)?$")     # Папка прогона: run_<номер> с опциональной меткой
@@ -111,13 +122,13 @@ REDUCE_LR_MIN_LR = 0.000001     # Минимальное значение LR
 REDUCE_LR_MONITOR = 'val_loss'  # Метрика для отслеживания плато
 
 
-class ModelTrainerWinV1:
+class ModelTrainerTimeV1:
     """
-    Координатор обучения ансамбля моделей Win v1 с K-fold кросс-валидацией.
+    Координатор обучения ансамбля моделей Time v1 с K-fold кросс-валидацией.
 
     Класс управляет полным циклом обучения: загрузка данных через DataLoaderV1,
-    разбиение на фолды, создание архитектуры, компиляция, обучение отдельных моделей
-    и сбор итоговой статистики по всем фолдам.
+    стандартизация целевой переменной, разбиение на фолды, создание архитектуры,
+    компиляция, обучение отдельных моделей и сбор итоговой статистики по всем фолдам.
 
     Attributes:
         loader (DataLoaderV1): Загрузчик данных
@@ -128,6 +139,8 @@ class ModelTrainerWinV1:
         hidden_units (List[int]): Размеры скрытых Dense слоев
         dropout_rate (float): Коэффициент dropout
         l2_reg (float): Коэффициент L2 регуляризации
+        target_mean (float): Среднее целевой переменной (заполняется при обучении)
+        target_std (float): Стандартное отклонение целевой переменной (при обучении)
     """
 
     def __init__(self,
@@ -165,17 +178,22 @@ class ModelTrainerWinV1:
         self.dropout_rate = dropout_rate
         self.l2_reg = l2_reg
 
+        # Параметры нормализации цели определяются при загрузке данных в train()
+        self.target_mean = 0.0
+        self.target_std = 1.0
+
     def train(self, data_file_path: str, base_model_path: str) -> None:
         """
         Координирует полный цикл обучения ансамбля с K-fold кросс-валидацией.
 
         Последовательность действий:
         1. Фиксация сида (RANDOM_SEED) для всех источников случайности
-        2. Загрузка данных из HDF5 файла (в Dict формате) под целевую переменную win
-        3. Разбиение на N_FOLDS стратифицированных фолдов
-        4. Обучение отдельной модели на каждом фолде
-        5. Сохранение каждой модели с суффиксом _fold_N
-        6. Вывод итоговой статистики по всем фолдам
+        2. Загрузка данных из HDF5 файла (в Dict формате) под целевую переменную time
+        3. Стандартизация таргета и сохранение параметров нормализации рядом с моделями
+        4. Разбиение на N_FOLDS фолдов (KFold, без стратификации)
+        5. Обучение отдельной модели на каждом фолде в нормированном пространстве цели
+        6. Сохранение каждой модели с суффиксом _fold_N
+        7. Вывод итоговой статистики по всем фолдам
 
         Args:
             data_file_path (str): Путь к HDF5 файлу с данными
@@ -199,22 +217,26 @@ class ModelTrainerWinV1:
             # Загрузка данных напрямую через DataLoader под целевую переменную (MODEL_TYPE)
             features_all, labels_all = self.loader.load_data_from_hdf5(data_file_path, target=MODEL_TYPE)
 
-            # Инициализация кросс-валидации (разбиение завязано на тот же RANDOM_SEED)
+            # Стандартизация цели: считаем mean/std по всему обучающему набору и сохраняем
+            labels_norm = self._fit_target_normalization(labels_all)
+            self._save_target_normalization(base_model_path)
+
+            # Инициализация кросс-валидации (разбиение завязано на тот же RANDOM_SEED).
             total_samples = features_all['radiant_heroes'].shape[0]
-            skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_SEED)
+            kf = KFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_SEED)
 
             fold_results = []
 
             print_section_header(f"ОБУЧЕНИЕ {N_FOLDS} МОДЕЛЕЙ (K-FOLD CV)", "🧠", color=Colors.GREEN_1)
 
             # Обучение отдельных фолдов
-            for fold_num, (train_idx, val_idx) in enumerate(skf.split(np.zeros(total_samples), labels_all), 1):
+            for fold_num, (train_idx, val_idx) in enumerate(kf.split(np.zeros(total_samples)), 1):
                 fold_result = self._train_single_fold(
                     fold_num=fold_num,
                     train_idx=train_idx,
                     val_idx=val_idx,
                     features_all=features_all,
-                    labels_all=labels_all,
+                    labels_norm=labels_norm,
                     save_path=base_model_path
                 )
                 fold_results.append(fold_result)
@@ -243,17 +265,73 @@ class ModelTrainerWinV1:
         finally:
             self.loader.hero_mapper.cleanup()
 
+    def _fit_target_normalization(self, labels_all: np.ndarray) -> np.ndarray:
+        """
+        Вычисляет параметры стандартизации цели и возвращает нормированные метки.
+
+        Среднее и стандартное отклонение считаются один раз по всему обучающему набору
+        и сохраняются в атрибутах для последующей записи в файл. Нулевое отклонение
+        (вырожденный случай одинаковых значений) заменяется на 1.0, чтобы исключить
+        деление на ноль.
+
+        Args:
+            labels_all (np.ndarray): Исходные метки длительности (секунды), shape (N,)
+
+        Returns:
+            np.ndarray: Нормированные метки (mean 0, std 1), dtype float32
+        """
+
+        mean = float(labels_all.mean())
+        std = float(labels_all.std())
+        if std == 0.0:
+            std = 1.0  # Защита от деления на ноль в вырожденном наборе
+
+        self.target_mean = mean
+        self.target_std = std
+
+        # Вывод параметров нормализации в исходных единицах (секунды и минуты)
+        print_subsection_header("Нормализация целевой переменной", "📊", Colors.TEAL_2)
+        print_info_line("Среднее (duration)", f"{mean:.1f} сек / {mean / 60:.1f} мин", "📏",
+                        Colors.BLUE_3, Colors.BRIGHT_CYAN)
+        print_info_line("Стд. отклонение", f"{std:.1f} сек / {std / 60:.1f} мин", "📐",
+                        Colors.BLUE_3, Colors.LAVENDER)
+
+        return ((labels_all - mean) / std).astype(np.float32)
+
+    def _save_target_normalization(self, base_model_path: str) -> None:
+        """
+        Сохраняет параметры нормализации цели в JSON рядом с моделями прогона.
+
+        Файл кладётся в ту же папку, что и модели фолдов, и позднее читается тестером
+        для разворота предсказаний из нормированного пространства обратно в секунды.
+
+        Args:
+            base_model_path (str): Базовый путь к моделям (определяет папку прогона)
+        """
+
+        norm_path = Path(base_model_path).parent / TARGET_NORM_FILENAME
+        payload = {
+            'target': MODEL_TYPE,
+            'mean': self.target_mean,
+            'std': self.target_std
+        }
+        with open(norm_path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+        print_info_line("Параметры нормализации", norm_path.name, "💾",
+                        Colors.BLUE_3, Colors.BRIGHT_GREEN)
+
     def _print_model_configuration(self) -> None:
         """
-        Выводит конфигурацию модели: архитектуру, регуляризацию, параметры обучения.
+        Выводит конфигурацию модели: задачу, архитектуру, регуляризацию, параметры обучения.
         """
 
         print_subsection_header("Конфигурация модели", "🔧", Colors.TEAL_2)
 
         # Задача
-        print_info_line("Тип задачи", "Бинарная классификация (radiant_win)", "🎯",
+        print_info_line("Тип задачи", "Регрессия (duration, сек)", "🎯",
                         Colors.BLUE_3, Colors.BRIGHT_GREEN)
-        print_info_line("Loss / метрики", "BCE / Accuracy, AUC, Precision, Recall", "📉",
+        print_info_line("Loss / метрики", "MSE / MAE, RMSE", "📉",
                         Colors.BLUE_3, Colors.BRIGHT_CYAN)
 
         # Архитектура
@@ -286,7 +364,7 @@ class ModelTrainerWinV1:
 
     def _build_and_compile_model(self) -> Model:
         """
-        Создает и компилирует архитектуру нейросети Win v1.
+        Создает и компилирует архитектуру нейросети Time v1.
 
         Архитектура:
         1. Входы: radiant_heroes [5] + dire_heroes [5] (int32 индексы)
@@ -294,7 +372,7 @@ class ModelTrainerWinV1:
         3. Average Pooling: GlobalAveragePooling1D для каждой команды
         4. Concatenate → объединение представлений команд [2 × embedding_dim]
         5. MLP: Dense → BatchNorm → ReLU → Dropout (повторяется N раз)
-        6. Выходной слой: Dense(1, sigmoid) → вероятность победы Radiant
+        6. Выходной слой: Dense(1, linear) → длительность в нормированном пространстве
 
         Особенности реализации:
         - Average pooling создаёт permutation-invariant представление команды
@@ -305,11 +383,14 @@ class ModelTrainerWinV1:
           слоя Dense, поэтому отдельное масштабирование не применяется.
         - Shared embedding: один embedding слой для обеих команд, что означает
           одинаковое представление героя вне зависимости от стороны (Radiant/Dire).
+        - Выход линейный и работает в стандартизованном пространстве цели; обратное
+          преобразование в секунды выполняется на этапе тестирования по сохранённым
+          параметрам нормализации.
 
         Компиляция:
-        - Loss: binary_crossentropy
+        - Loss: mean_squared_error
         - Optimizer: Adam
-        - Metrics: accuracy, AUC, precision, recall
+        - Metrics: MAE, RMSE (в нормированных единицах)
 
         Returns:
             Model: Скомпилированная модель готовая к обучению
@@ -351,25 +432,23 @@ class ModelTrainerWinV1:
             x = Activation('relu', name=f'relu_{layer_idx}')(x)
             x = Dropout(self.dropout_rate, name=f'dropout_{layer_idx}')(x)
 
-        # Выходной слой
-        output = Dense(1, activation='sigmoid', name='output')(x)
+        # Выходной слой (линейный: регрессия в нормированном пространстве)
+        output = Dense(1, activation='linear', name='output')(x)
 
         # Создание модели
         model = Model(
             inputs={'radiant_heroes': radiant_input, 'dire_heroes': dire_input},
             outputs=output,
-            name='dota2_win_predictor'
+            name='dota2_time_predictor'
         )
 
         # Компиляция
         model.compile(
             optimizer=Adam(learning_rate=self.learning_rate),
-            loss='binary_crossentropy',
+            loss='mean_squared_error',
             metrics=[
-                'accuracy',
-                AUC(name='auc'),
-                Precision(name='precision'),
-                Recall(name='recall')
+                MeanAbsoluteError(name='mae'),
+                RootMeanSquaredError(name='rmse')
             ]
         )
 
@@ -380,7 +459,7 @@ class ModelTrainerWinV1:
                            train_idx: np.ndarray,
                            val_idx: np.ndarray,
                            features_all: Dict[str, np.ndarray],
-                           labels_all: np.ndarray,
+                           labels_norm: np.ndarray,
                            save_path: str) -> Dict[str, Any]:
         """
         Обучает одну модель на указанном фолде.
@@ -389,17 +468,18 @@ class ModelTrainerWinV1:
         1. Разбиение данных на train/val по индексам из Dict формата
         2. Создание и компиляция модели
         3. Настройка callbacks (EarlyStopping, ReduceLROnPlateau)
-        4. Обучение через model.fit()
+        4. Обучение через model.fit() в нормированном пространстве цели
         5. Оценка восстановленных лучших весов на валидации (model.evaluate)
-        6. Сохранение модели с суффиксом _fold_N
-        7. Очистка памяти
+        6. Перевод метрик ошибки из нормированных единиц в минуты для читаемости
+        7. Сохранение модели с суффиксом _fold_N
+        8. Очистка памяти
 
         Args:
             fold_num (int): Номер текущего фолда (1-based)
             train_idx (np.ndarray): Индексы тренировочных данных
             val_idx (np.ndarray): Индексы валидационных данных
             features_all (Dict[str, np.ndarray]): Все признаки в Dict формате
-            labels_all (np.ndarray): Все метки результатов
+            labels_norm (np.ndarray): Все нормированные метки длительности
             save_path (str): Базовый путь для сохранения модели
 
         Returns:
@@ -415,13 +495,13 @@ class ModelTrainerWinV1:
             'radiant_heroes': features_all['radiant_heroes'][train_idx],
             'dire_heroes': features_all['dire_heroes'][train_idx]
         }
-        y_train = labels_all[train_idx]
+        y_train = labels_norm[train_idx]
 
         X_val = {
             'radiant_heroes': features_all['radiant_heroes'][val_idx],
             'dire_heroes': features_all['dire_heroes'][val_idx]
         }
-        y_val = labels_all[val_idx]
+        y_val = labels_norm[val_idx]
 
         train_size = len(train_idx)
         val_size = len(val_idx)
@@ -456,9 +536,14 @@ class ModelTrainerWinV1:
             verbose=0,
             return_dict=True
         )
-        best_val_auc = float(val_metrics['auc'])
-        best_val_acc = float(val_metrics['accuracy'])
-        best_val_loss = float(val_metrics['loss'])
+        best_val_loss = float(val_metrics['loss'])      # MSE в нормированном пространстве
+        val_mae_norm = float(val_metrics['mae'])        # MAE в нормированном пространстве
+        val_rmse_norm = float(val_metrics['rmse'])      # RMSE в нормированном пространстве
+
+        # Перевод ошибки в минуты: умножение на std возвращает исходный масштаб (секунды)
+        best_val_mae_min = val_mae_norm * self.target_std / 60.0
+        best_val_rmse_min = val_rmse_norm * self.target_std / 60.0
+
         epochs_trained = len(history.history['loss'])
 
         # Сохранение модели
@@ -470,7 +555,8 @@ class ModelTrainerWinV1:
         # Вывод статистики
         self._print_fold_statistics(
             fold_num, model.count_params(),
-            best_val_auc, best_val_acc, best_val_loss, epochs_trained, fold_training_time
+            best_val_mae_min, best_val_rmse_min, val_rmse_norm, best_val_loss,
+            epochs_trained, fold_training_time
         )
 
         # Очистка памяти: сначала удаляем ссылку на модель, затем очищаем сессию Keras.
@@ -484,9 +570,10 @@ class ModelTrainerWinV1:
             'val_size': val_size,
             'epochs_trained': epochs_trained,
             'training_time': fold_training_time,
-            'best_val_auc': best_val_auc,
-            'best_val_accuracy': best_val_acc,
             'best_val_loss': best_val_loss,
+            'best_val_mae_min': best_val_mae_min,
+            'best_val_rmse_min': best_val_rmse_min,
+            'best_val_rmse_norm': val_rmse_norm,
             'history': history.history
         }
 
@@ -523,17 +610,19 @@ class ModelTrainerWinV1:
         ]
 
     @staticmethod
-    def _print_fold_statistics(fold_num: int, model_params: int, best_val_auc: float, best_val_acc: float,
-                               best_val_loss: float, epochs_trained: int, training_time: float) -> None:
+    def _print_fold_statistics(fold_num: int, model_params: int, best_val_mae_min: float, best_val_rmse_min: float,
+                               best_val_rmse_norm: float, best_val_loss: float, epochs_trained: int,
+                               training_time: float) -> None:
         """
         Выводит статистику завершенного фолда.
 
         Args:
             fold_num (int): Номер фолда
             model_params (int): Количество параметров модели
-            best_val_auc (float): AUC сохранённой модели на валидации
-            best_val_acc (float): Accuracy сохранённой модели на валидации
-            best_val_loss (float): Loss сохранённой модели на валидации
+            best_val_mae_min (float): MAE на валидации в минутах
+            best_val_rmse_min (float): RMSE на валидации в минутах
+            best_val_rmse_norm (float): RMSE на валидации в нормированных единицах
+            best_val_loss (float): Loss (нормированный MSE) сохранённой модели
             epochs_trained (int): Количество обученных эпох
             training_time (float): Время обучения в секундах
         """
@@ -542,11 +631,13 @@ class ModelTrainerWinV1:
 
         print_info_line("Эпох обучено", f"{epochs_trained}", "🔁",
                         Colors.BLUE_3, Colors.MINT)
-        print_info_line("Val AUC", f"{best_val_auc:.4f}", "⭐",
+        print_info_line("Val MAE", f"{best_val_mae_min:.2f} мин", "⭐",
                         Colors.BLUE_3, Colors.GOLD_1)
-        print_info_line("Val accuracy", f"{best_val_acc:.4f}", "🌟",
+        print_info_line("Val RMSE", f"{best_val_rmse_min:.2f} мин", "🌟",
                         Colors.BLUE_3, Colors.GOLD_3)
-        print_info_line("Val loss", f"{best_val_loss:.4f}", "📉",
+        print_info_line("Val RMSE (норм.)", f"{best_val_rmse_norm:.4f} (baseline 1.0)", "📏",
+                        Colors.BLUE_3, Colors.BRIGHT_CYAN)
+        print_info_line("Val loss (MSE норм.)", f"{best_val_loss:.4f}", "📉",
                         Colors.BLUE_3, Colors.BRIGHT_PURPLE)
         print_info_line("Параметров модели", f"{model_params:,}", "🧩",
                         Colors.BLUE_3, Colors.BRIGHT_CYAN)
@@ -565,17 +656,20 @@ class ModelTrainerWinV1:
         print_section_header("ФИНАЛЬНЫЕ РЕЗУЛЬТАТЫ АНСАМБЛЯ", "🏆", color=Colors.GOLD_1)
 
         # Расчет средних метрик
-        avg_val_auc = float(np.mean([fold_data['best_val_auc'] for fold_data in fold_results]))
-        avg_val_acc = float(np.mean([fold_data['best_val_accuracy'] for fold_data in fold_results]))
-        std_val_auc = float(np.std([fold_data['best_val_auc'] for fold_data in fold_results]))
-        std_val_acc = float(np.std([fold_data['best_val_accuracy'] for fold_data in fold_results]))
+        avg_val_mae = float(np.mean([fold_data['best_val_mae_min'] for fold_data in fold_results]))
+        avg_val_rmse = float(np.mean([fold_data['best_val_rmse_min'] for fold_data in fold_results]))
+        std_val_mae = float(np.std([fold_data['best_val_mae_min'] for fold_data in fold_results]))
+        std_val_rmse = float(np.std([fold_data['best_val_rmse_min'] for fold_data in fold_results]))
+        avg_val_rmse_norm = float(np.mean([fold_data['best_val_rmse_norm'] for fold_data in fold_results]))
         avg_training_time = float(np.mean([fold_data['training_time'] for fold_data in fold_results]))
 
         print_subsection_header("Средние метрики по фолдам", "🧪", Colors.GOLD_2)
-        print_info_line("Средний val AUC", f"{avg_val_auc:.4f} ± {std_val_auc:.4f}", "📏",
+        print_info_line("Средний val MAE", f"{avg_val_mae:.2f} ± {std_val_mae:.2f} мин", "📏",
                         Colors.BLUE_3, Colors.GOLD_1)
-        print_info_line("Средняя val accuracy", f"{avg_val_acc:.4f} ± {std_val_acc:.4f}", "⚖️",
+        print_info_line("Средний val RMSE", f"{avg_val_rmse:.2f} ± {std_val_rmse:.2f} мин", "⚖️",
                         Colors.BLUE_3, Colors.GOLD_3)
+        print_info_line("Средний val RMSE (норм.)", f"{avg_val_rmse_norm:.4f} (baseline 1.0)", "🎯",
+                        Colors.BLUE_3, Colors.BRIGHT_CYAN)
         print_info_line("Среднее время обучения фолда", f"{avg_training_time / 60:.1f} мин.", "⏰",
                         Colors.BLUE_3, Colors.LAVENDER)
 
@@ -584,8 +678,8 @@ class ModelTrainerWinV1:
         for fold_data in fold_results:
             fold_time = fold_data['training_time']
             fold_value = (
-                f"{Colors.GOLD_4}AUC:{Colors.RESET} {Colors.GOLD_1}{fold_data['best_val_auc']:.4f}{Colors.RESET}, "
-                f"{Colors.BRIGHT_GREEN}ACC:{Colors.RESET} {Colors.GOLD_3}{fold_data['best_val_accuracy']:.4f}{Colors.RESET}, "
+                f"{Colors.GOLD_4}MAE:{Colors.RESET} {Colors.GOLD_1}{fold_data['best_val_mae_min']:.2f}м{Colors.RESET}, "
+                f"{Colors.BRIGHT_GREEN}RMSE:{Colors.RESET} {Colors.GOLD_3}{fold_data['best_val_rmse_min']:.2f}м{Colors.RESET}, "
                 f"{Colors.TEAL_3}Эпох:{Colors.RESET} {Colors.BRIGHT_WHITE}{fold_data['epochs_trained']}{Colors.RESET}, "
                 f"{Colors.BRIGHT_PURPLE}Время:{Colors.RESET} {Colors.LAVENDER}{fold_time / 60:.1f}м{Colors.RESET}")
 
@@ -617,12 +711,12 @@ def print_startup_header() -> None:
     Выводит стартовый заголовок программы.
     """
 
-    print_section_header("ЗАПУСК ОБУЧЕНИЯ WIN-PREDICTOR V1", "🚀", color=Colors.VIOLET_2)
-    print_info_line("Версия модели", "Win Prediction v1", "🤖",
+    print_section_header("ЗАПУСК ОБУЧЕНИЯ TIME-PREDICTOR V1", "🚀", color=Colors.VIOLET_2)
+    print_info_line("Версия модели", "Time Prediction v1", "🤖",
                     Colors.BLUE_3, Colors.BRIGHT_CYAN)
     print_info_line("Тип валидации", "K-Fold Cross Validation", "🧪",
                     Colors.BLUE_3, Colors.BRIGHT_GREEN)
-    print_info_line("Архитектура", "Hero Embedding + MLP", "🧠",
+    print_info_line("Архитектура", "Hero Embedding + MLP (регрессия)", "🧠",
                     Colors.BLUE_3, Colors.LAVENDER)
     print_info_line("Фреймворк", "Keras (TensorFlow)", "🔧",
                     Colors.BLUE_3, Colors.GOLD_3)
@@ -744,7 +838,7 @@ def main() -> None:
     model_output_path = str(run_dir / MODEL_FILENAME.format(version=DOTA_VERSION))
 
     # Создание тренера и запуск обучения
-    trainer = ModelTrainerWinV1(epochs=DEFAULT_EPOCHS)
+    trainer = ModelTrainerTimeV1(epochs=DEFAULT_EPOCHS)
     trainer.train(data_file_path=hdf5_file_path, base_model_path=model_output_path)
 
 
