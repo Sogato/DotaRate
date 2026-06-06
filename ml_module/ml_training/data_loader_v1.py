@@ -174,8 +174,10 @@ class DataLoaderV1:
 
         Для 'win' показывает баланс классов (доля побед каждой стороны).
         Для регрессионных типов ('score', 'time') показывает распределение каждого
-        целевого поля: среднее, минимум и максимум — этого достаточно, чтобы оценить
-        масштаб таргета и впоследствии понять качество модели относительно него.
+        целевого поля: среднее ± стандартное отклонение, медиану и диапазон
+        (мин–макс). Этого достаточно, чтобы оценить и масштаб таргета, и его
+        разброс. Для 'time' значения переводятся из секунд в Ч:ММ:СС / ММ:СС,
+        чтобы длительности читались осмысленно.
 
         Args:
             labels_all (np.ndarray): Метки выборки, (N,) или (N, число_полей)
@@ -201,11 +203,39 @@ class DataLoaderV1:
         # reshape к 2D даёт единый перебор столбцов и для (N,), и для (N, K)
         fields = TARGET_FIELDS[target]
         columns = labels_all.reshape(total, -1)
+
+        # Для 'time' значения — секунды, поэтому переводим их в Ч:ММ:СС / ММ:СС.
+        # Для остальных таргетов оставляем числа как есть.
+        is_time = target == 'time'
+
+        def fmt(value: float, decimals: int = 1) -> str:
+            if is_time:
+                total_sec = int(round(float(value)))
+                hours, rem = divmod(total_sec, 3600)
+                minutes, seconds = divmod(rem, 60)
+                if hours:
+                    return f"{hours}:{minutes:02d}:{seconds:02d}"
+                return f"{minutes}:{seconds:02d}"
+            return f"{value:.{decimals}f}"
+
         for col_idx, field in enumerate(fields):
             col = columns[:, col_idx]
-            col_stats = f"среднее {col.mean():.1f} | мин {col.min():.0f} | макс {col.max():.0f}"
-            print_info_line(field, col_stats, "📊",
-                            Colors.BLUE_3, Colors.BRIGHT_CYAN)
+
+            # Эмодзи и цвет под поле, в палитре баланса побед:
+            if field == 'radiant_score':
+                emoji, value_color = "🌞", Colors.GOLD_3
+            elif field == 'dire_score':
+                emoji, value_color = "🌑", Colors.BRIGHT_PURPLE
+            elif field == 'duration':
+                emoji, value_color = "⏱️", Colors.BRIGHT_GREEN
+            else:
+                emoji, value_color = "📊", Colors.BRIGHT_CYAN
+
+            stats = (f"{fmt(col.mean())} ± {fmt(col.std())} | "
+                     f"медиана {fmt(np.median(col), decimals=0)} | "
+                     f"от {fmt(col.min(), decimals=0)} до {fmt(col.max(), decimals=0)}")
+            print_info_line(field, stats, emoji,
+                            Colors.BLUE_3, value_color)
 
     def load_data_from_hdf5(self,
                             hdf5_path: str,
