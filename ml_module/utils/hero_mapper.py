@@ -12,7 +12,7 @@
 - Кеширование результатов для повторных обращений
 """
 
-from typing import Dict, Set
+from typing import Dict, Set, Any
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -35,9 +35,9 @@ class HeroMapper:
         session_maker: Фабрика сессий SQLAlchemy
     """
 
-    def __init__(self, excluded_hero_ids: Set[int] = None):
+    def __init__(self, excluded_hero_ids: Set[int] | None = None):
         """
-        Инициализирует маппер с с настройкой подключения к БД и опциональным исключением героев.
+        Инициализирует маппер с настройкой подключения к БД и опциональным исключением героев.
 
         Args:
             excluded_hero_ids (Set[int], optional): Множество hero_id для исключения
@@ -136,7 +136,7 @@ class HeroMapper:
         self._build_mappings()
         return len(self._hero_to_index)
 
-    def get_mapping_info(self) -> Dict[str, any]:
+    def get_mapping_info(self) -> Dict[str, Any]:
         """
         Возвращает статистику и метаданные о маппинге.
 
