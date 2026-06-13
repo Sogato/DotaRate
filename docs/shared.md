@@ -31,7 +31,7 @@ dota_core/
 
 Что лежит в общем config:
 
-- **Базы данных.** Параметры подключения и три PostgreSQL-URI: `DATASET_DATABASE_URL`, `HEROES_DATABASE_URL`, `PRO_DATABASE_URL`.
+- **Базы данных.** Параметры подключения и PostgreSQL-URI: `DATASET_DATABASE_URL`, `HEROES_DATABASE_URL`, `PRO_DATABASE_URL` и `BACKEND_DATABASE_URL`.
 - **Внешние API.** Ключи и эндпоинты Steam API и OpenDota API.
 - **Обновляемые параметры патча.** `DOTA_VERSION`, `STARTING_MATCH_SEQUENCE_NUMBER`, `BURST_TIME_TIMESTAMP` — меняются при выходе нового патча Dota 2.
 - **Игровые константы Dota 2.** Размер команды (`TEAM_SIZE`), индексы сторон (`RADIANT_INDEX`/`DIRE_INDEX`), битовые маски и количества построек, маски `player_slot`, справочники `GAME_MODES` / `LOBBY_TYPES` / `SERIES_TYPES`.

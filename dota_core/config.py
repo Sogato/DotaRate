@@ -38,6 +38,15 @@ DATASET_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT
 HEROES_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{HEROES_DB_NAME}"
 PRO_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{PRO_DB_NAME}"
 
+# ───────────────────────────────────────────────────────────────────────────
+# (Технический долг): константы ниже специфичны для backend и лежат здесь
+# временно. По правилу зависимостей из shared.md общее ядро не должно знать про
+# конкретные модули. При будущем рефакторинге переехать в локальный конфиг
+# backend (или соответствующий слой настроек).
+# ───────────────────────────────────────────────────────────────────────────
+BACKEND_DB_NAME = _os.getenv('BACKEND_DB_NAME')  # БД backend
+BACKEND_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{BACKEND_DB_NAME}"
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ВНЕШНИЕ API
