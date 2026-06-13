@@ -70,7 +70,7 @@ from utils.console import (
     print_status_message,
     print_subsection_header,
 )
-from utils.hero_mapper import HeroMapper
+from dota_core.hero_mapper import HeroMapper
 
 # === НАСТРОЙКИ TFRECORD ПРЕПРОЦЕССОРА ===
 TFRECORD_FILE_NAME = "TFRecord_dataset"     # Базовое имя выходных файлов

@@ -46,7 +46,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 # Локальные импорты
-from utils.hero_mapper import HeroMapper
+from dota_core.hero_mapper import HeroMapper
 from data_bases.pro_matches.models import ProMatch, ProMatchPlayer
 from config import (
     DIRE_INDEX,
@@ -467,25 +467,3 @@ class DataLoaderV1:
         }
 
         return features, labels_all
-
-    def get_single_match_input(self, radiant_hero_ids: List[int], dire_hero_ids: List[int]) -> Dict[str, np.ndarray]:
-        """
-        Преобразует составы одного матча в numpy массивы.
-
-        Выполняет полную предобработку: hero_id → плотные индексы.
-
-        Args:
-            radiant_hero_ids (List[int]): 5 hero_id команды Radiant
-            dire_hero_ids (List[int]): 5 hero_id команды Dire
-
-        Returns:
-            Dict[str, np.ndarray]: {'radiant_heroes': (1, 5), 'dire_heroes': (1, 5)}, dtype int32
-        """
-
-        radiant_indices = self._process_team_heroes(radiant_hero_ids, from_ids=True)
-        dire_indices = self._process_team_heroes(dire_hero_ids, from_ids=True)
-
-        return {
-            'radiant_heroes': np.array([radiant_indices], dtype=np.int32),
-            'dire_heroes': np.array([dire_indices], dtype=np.int32)
-        }

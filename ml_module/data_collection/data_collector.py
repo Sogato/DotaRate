@@ -40,7 +40,7 @@ from config import (
     REQUIRED_PLAYER_FIELDS, REQUIRED_MATCH_FIELDS, ALLOWED_GAME_MODES, ALLOWED_LOBBY_TYPES, VALID_LEAVER_STATUSES,
     SUPPORT_ITEM_IDS, HERO_ITEM_EXCEPTIONS, HERO_SUPPORT_SCORE_EXCEPTIONS, HERO_RUINER_EXCEPTIONS,
 )
-from utils.hero_cache import HeroCache
+from dota_core.hero_cache import HeroCache
 from utils.console import (
     Colors,
     print_section_header,
