@@ -3,16 +3,16 @@
 
 Модуль реализует единый сценарий оценки ансамбля из N моделей (фолдов K-fold CV):
 адаптивное обнаружение моделей, получение данных из взаимозаменяемых источников,
-приведение к единому формату признаков, усреднение предсказаний (soft-voting),
-разворот их в исходный масштаб (секунды) и расчёт регрессионных метрик с разбором
-ошибки по диапазонам длительности и сравнением с baseline.
+приведение к единому формату признаков, усреднение предсказаний (soft-voting)
+и расчёт регрессионных метрик с разбором ошибки по диапазонам длительности и
+сравнением с baseline.
 
 Ключевые особенности:
 - Источники: HDF5 файл с тестовой выборкой и БД профессиональных матчей (взаимозаменяемы)
 - Предсказания: вычисляются батчами средствами Keras для контроля потребления памяти
-- Нормализация: модели обучены в стандартизованном пространстве цели, поэтому их
-  предсказания разворачиваются обратно в секунды по сохранённым тренером параметрам
-  (mean/std из TARGET_NORM_FILENAME в папке прогона)
+- Масштаб предсказаний: модели выдают длительность сразу в секундах. Разворот из
+  нормированного пространства встроен в сами модели тренером (фиксированным слоем
+  денормализации), поэтому тестеру не нужны никакие внешние параметры нормализации
 
 Две оцениваемые сущности:
 - Ансамбль (soft-voting): усреднение предсказаний всех моделей.
@@ -22,10 +22,9 @@
 1. Интерактивный выбор прогона (ансамбля) для тестирования
 2. Интерактивный выбор источника данных (HDF5 или БД)
 3. Адаптивное обнаружение моделей ансамбля внутри папки прогона
-4. Загрузка параметров нормализации цели прогона
-5. Загрузка данных и приведение к единому Dict формату через загрузчик
-6. Получение предсказаний по каждой модели, усреднение и разворот в секунды
-7. Расчёт метрик ансамбля, метрик отдельных моделей и сравнение с baseline
+4. Загрузка данных и приведение к единому Dict формату через загрузчик
+5. Получение предсказаний по каждой модели (в секундах) и усреднение в ансамбль
+6. Расчёт метрик ансамбля, метрик отдельных моделей и сравнение с baseline
 
 Метрики ансамбля считаются один раз за прогон: сводка остатков выводится в начале
 отчёта, а основные показатели качества (MAE/RMSE/R²) — в конце. Baseline предсказания
@@ -41,7 +40,6 @@ import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 
 # Стандартные библиотеки
-import json
 import re
 import sys
 from pathlib import Path
@@ -67,7 +65,6 @@ from utils.console import (
 # === КОНСТАНТЫ ФАЙЛОВ ===
 HDF5_FILENAME = "HDF5_dataset_{version}_test.h5"    # Имя HDF5 файла с тестовой выборкой
 MODEL_FILENAME = "model_time_v1_{version}.keras"    # Базовое имя моделей (суффикс _fold_N в именах фолдов)
-TARGET_NORM_FILENAME = "target_norm.json"           # Файл параметров нормализации цели (рядом с моделями)
 
 # === КОНСТАНТЫ СТРУКТУРЫ ХРАНЕНИЯ ===
 MODEL_TYPE = "time"                                     # Тип модели (служит и типом цели загрузчика)
@@ -88,11 +85,10 @@ class ModelTesterTimeV1:
     Координатор тестирования ансамбля моделей Time v1.
 
     Класс управляет полным циклом оценки: адаптивное обнаружение моделей фолдов,
-    загрузка параметров нормализации и самого ансамбля, приведение источника
-    (БД или HDF5) к единому Dict формату через DataLoaderV1, получение предсказаний
-    по каждой модели, усреднение в ансамбль (soft-voting), разворот в секунды и
-    расчёт регрессионных метрик ансамбля, метрик отдельных моделей и сравнения
-    с baseline предсказания среднего.
+    загрузка ансамбля, приведение источника (БД или HDF5) к единому Dict формату
+    через DataLoaderV1, получение предсказаний по каждой модели (в секундах),
+    усреднение в ансамбль (soft-voting) и расчёт регрессионных метрик ансамбля,
+    метрик отдельных моделей и сравнения с baseline предсказания среднего.
 
     Attributes:
         loader (DataLoaderV1): Загрузчик данных
@@ -100,8 +96,6 @@ class ModelTesterTimeV1:
         max_matches (Optional[int]): Лимит матчей для БД (None = все)
         league_ids (Set[int]): Фильтр по ID лиг для БД (пустое множество = все лиги)
         duration_buckets_min (List[int]): Границы диапазонов длительности (минуты)
-        target_mean (float): Среднее цели из параметров нормализации прогона
-        target_std (float): Стандартное отклонение цели из параметров нормализации
     """
 
     def __init__(self,
@@ -134,10 +128,6 @@ class ModelTesterTimeV1:
             else DEFAULT_DURATION_BUCKETS_MIN.copy()
         )
 
-        # Параметры нормализации цели загружаются из прогона в test()
-        self.target_mean = 0.0
-        self.target_std = 1.0
-
     def test(self,
              model_base_path: str,
              data_source: str,
@@ -147,10 +137,9 @@ class ModelTesterTimeV1:
 
         Последовательность действий:
         1. Адаптивное обнаружение моделей ансамбля по шаблону имени фолдов
-        2. Загрузка параметров нормализации цели прогона
-        3. Загрузка моделей и приведение источника (БД или HDF5) к единому формату
-        4. Получение предсказаний по каждой модели, усреднение и разворот в секунды
-        5. Расчёт метрик ансамбля, метрик отдельных моделей и сравнение с baseline
+        2. Загрузка моделей и приведение источника (БД или HDF5) к единому формату
+        3. Получение предсказаний по каждой модели (в секундах) и усреднение в ансамбль
+        4. Расчёт метрик ансамбля, метрик отдельных моделей и сравнение с baseline
 
         Метрики ансамбля рассчитываются один раз: сводка остатков выводится в начале
         отчёта, а основные показатели качества — в конце. Baseline предсказания среднего
@@ -193,19 +182,6 @@ class ModelTesterTimeV1:
             print_info_line("Найдено моделей в ансамбле", f"{len(model_paths)}", "🤖",
                             Colors.BLUE_3, Colors.BRIGHT_GREEN)
 
-            # Загрузка параметров нормализации цели (нужны для разворота предсказаний)
-            normalization = self._load_target_normalization(model_base_path)
-            if normalization is None:
-                norm_path = Path(model_base_path).parent / TARGET_NORM_FILENAME
-                error_msg = f"Не найдены параметры нормализации: {norm_path}"
-                print_status_message(error_msg, "error", "❌")
-                return {'success': False, 'error': error_msg}
-
-            self.target_mean, self.target_std = normalization
-            print_info_line("Нормализация цели",
-                            f"mean {self.target_mean / 60:.1f} мин / std {self.target_std / 60:.1f} мин",
-                            "📊", Colors.BLUE_3, Colors.BRIGHT_CYAN)
-
             # Ранняя проверка наличия HDF5 файла до загрузки моделей
             if data_source == 'hdf5' and (not hdf5_path or not Path(hdf5_path).exists()):
                 error_msg = f"HDF5 файл не найден: {hdf5_path}"
@@ -228,11 +204,10 @@ class ModelTesterTimeV1:
                             f"диапазон {true_labels.min() / 60:.1f}–{true_labels.max() / 60:.1f} мин",
                             "⏱️", Colors.BLUE_3, Colors.BRIGHT_CYAN)
 
-            # Предсказания каждой модели (в нормированном пространстве); ансамбль = среднее
+            # Предсказания каждой модели (в секундах); ансамбль = среднее по моделям
             print_subsection_header("Получение предсказаний", "🔮", Colors.BRIGHT_CYAN)
-            model_predictions_norm = self._get_model_predictions(models, features)
-            # Разворот усреднённого предсказания в секунды
-            ensemble_predictions = self._denormalize(model_predictions_norm.mean(axis=0))
+            model_predictions = self._get_model_predictions(models, features)
+            ensemble_predictions = model_predictions.mean(axis=0)
 
             print_info_line("Обработано матчей", f"{ensemble_predictions.shape[0]:,}", "📊",
                             Colors.BLUE_3, Colors.BRIGHT_GREEN)
@@ -247,7 +222,7 @@ class ModelTesterTimeV1:
 
             # Метрики каждой модели по отдельности
             per_model_metrics = self._print_per_model_metrics(
-                model_paths, model_predictions_norm, true_labels
+                model_paths, model_predictions, true_labels
             )
 
             # Ошибка по диапазонам длительности
@@ -273,8 +248,6 @@ class ModelTesterTimeV1:
                 'model_paths': model_paths,
                 'data_source': data_source,
                 'test_samples': int(ensemble_predictions.shape[0]),
-                'target_mean': self.target_mean,
-                'target_std': self.target_std,
                 'metrics': metrics,
                 'per_model_metrics': per_model_metrics,
                 'range_analysis': range_analysis,
@@ -295,21 +268,6 @@ class ModelTesterTimeV1:
         finally:
             # Освобождение ресурсов маппера героев
             self.loader.hero_mapper.cleanup()
-
-    def _denormalize(self, predictions_norm: np.ndarray) -> np.ndarray:
-        """
-        Разворачивает предсказания из нормированного пространства в секунды.
-
-        Обратно к стандартизации тренера: pred_сек = pred_норм * std + mean.
-
-        Args:
-            predictions_norm (np.ndarray): Предсказания в нормированных единицах
-
-        Returns:
-            np.ndarray: Предсказания длительности в секундах
-        """
-
-        return predictions_norm * self.target_std + self.target_mean
 
     def _print_test_configuration(self, data_source: str) -> None:
         """
@@ -365,31 +323,6 @@ class ModelTesterTimeV1:
         )
 
     @staticmethod
-    def _load_target_normalization(model_base_path: str) -> Optional[Tuple[float, float]]:
-        """
-        Загружает параметры нормализации цели из JSON в папке прогона.
-
-        Файл создаётся тренером рядом с моделями и хранит mean/std, которыми
-        стандартизовалась цель при обучении. Без него развернуть предсказания
-        в секунды нельзя.
-
-        Args:
-            model_base_path (str): Базовый путь к моделям (определяет папку прогона)
-
-        Returns:
-            Optional[Tuple[float, float]]: (mean, std) или None, если файла нет
-        """
-
-        norm_path = Path(model_base_path).parent / TARGET_NORM_FILENAME
-        if not norm_path.exists():
-            return None
-
-        with open(norm_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-
-        return float(data['mean']), float(data['std'])
-
-    @staticmethod
     def _load_models(model_paths: List) -> List:
         """
         Загружает модели ансамбля из указанных путей.
@@ -440,9 +373,8 @@ class ModelTesterTimeV1:
         """
         Вычисляет предсказания каждой модели ансамбля по отдельности, батчами.
 
-        Возвращает матрицу предсказаний (в нормированном пространстве цели) без
-        усреднения, чтобы вызывающий код мог получить и метрики ансамбля (среднее
-        по моделям), и метрики каждой модели в отдельности за один прогон.
+        Возвращается матрица предсказаний без усреднения, чтобы вызывающий код мог получить и метрики
+        ансамбля (среднее по моделям), и метрики каждой модели в отдельности за один прогон.
 
         Последовательность действий:
         1. Поочерёдный проход по моделям ансамбля
@@ -459,8 +391,8 @@ class ModelTesterTimeV1:
             features (Dict[str, np.ndarray]): Признаки {'radiant_heroes', 'dire_heroes'}
 
         Returns:
-            np.ndarray: Матрица предсказаний длительности в нормированных единицах,
-                shape (n_models, N). Усреднение по оси 0 даёт предсказание ансамбля.
+            np.ndarray: Матрица предсказаний длительности в секундах, shape (n_models, N).
+                Усреднение по оси 0 даёт предсказание ансамбля.
         """
 
         n_models = len(models)
@@ -593,18 +525,16 @@ class ModelTesterTimeV1:
 
     def _print_per_model_metrics(self,
                                  model_paths: List[str],
-                                 model_predictions_norm: np.ndarray,
+                                 model_predictions: np.ndarray,
                                  true_labels: np.ndarray) -> List[Dict[str, float]]:
         """
         Считает и выводит метрики каждой модели ансамбля по отдельности.
 
-        Предсказания каждой модели разворачиваются в секунды индивидуально, после чего
-        считаются те же регрессионные метрики, что и для ансамбля. Разброс этих метрик
-        характеризует не качество ансамбля, а стабильность фолдов между собой на тесте.
+        Разброс этих метрик характеризует не качество ансамбля, а стабильность фолдов между собой на тесте.
 
         Args:
             model_paths (List[str]): Пути к моделям фолдов (для извлечения метки фолда)
-            model_predictions_norm (np.ndarray): Матрица предсказаний (n_models, N) в норм. ед.
+            model_predictions (np.ndarray): Матрица предсказаний (n_models, N) в секундах
             true_labels (np.ndarray): Истинные метки (секунды)
 
         Returns:
@@ -613,10 +543,8 @@ class ModelTesterTimeV1:
 
         print_subsection_header("Метрики по моделям ансамбля", "🧩", Colors.BRIGHT_CYAN)
         per_model_metrics = []
-        for model_path, model_preds_norm in zip(model_paths, model_predictions_norm):
-            # Разворот предсказаний конкретной модели в секунды
-            model_preds_sec = self._denormalize(model_preds_norm)
-            fold_metrics = self._calculate_metrics(model_preds_sec, true_labels)
+        for model_path, model_preds in zip(model_paths, model_predictions):
+            fold_metrics = self._calculate_metrics(model_preds, true_labels)
             per_model_metrics.append(fold_metrics)
             fold_label = Path(model_path).stem.split('_fold_')[-1]
             fold_value = (
