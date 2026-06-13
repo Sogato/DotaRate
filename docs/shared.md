@@ -20,7 +20,6 @@
 
 ```
 dota_core/
-    __init__.py
     config.py
     hero_mapper.py
     hero_cache.py
