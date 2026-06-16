@@ -29,6 +29,7 @@ DB_HOST = _os.getenv('DB_HOST')
 DB_PORT = _os.getenv('DB_PORT')
 
 # Названия баз данных
+BACKEND_DB_NAME = _os.getenv('BACKEND_DB_NAME')  # БД backend
 DATASET_DB_NAME = _os.getenv('DATASET_DB_NAME')  # Основная БД с матчами
 HEROES_DB_NAME = _os.getenv('HEROES_DB_NAME')    # Справочник героев
 PRO_DB_NAME = _os.getenv('PRO_DB_NAME')          # БД профессиональных матчей
@@ -37,16 +38,6 @@ PRO_DB_NAME = _os.getenv('PRO_DB_NAME')          # БД профессионал
 DATASET_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DATASET_DB_NAME}"
 HEROES_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{HEROES_DB_NAME}"
 PRO_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{PRO_DB_NAME}"
-
-# ───────────────────────────────────────────────────────────────────────────
-# (Технический долг): константы ниже специфичны для backend и лежат здесь
-# временно. По правилу зависимостей из shared.md общее ядро не должно знать про
-# конкретные модули. При будущем рефакторинге переехать в локальный конфиг
-# backend (или соответствующий слой настроек).
-# ───────────────────────────────────────────────────────────────────────────
-BACKEND_DB_NAME = _os.getenv('BACKEND_DB_NAME')  # БД backend
-BACKEND_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{BACKEND_DB_NAME}"
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ВНЕШНИЕ API

@@ -38,7 +38,7 @@ from data_validation.components.hero_analyzer import HeroAnalyzer
 from data_validation.components.pro_analyzer import ProAnalyzer
 from data_validation.components.intersection_checker import IntersectionChecker
 from config import PRIVATE_ACCOUNT_ID
-from dota_core.hero_cache import HeroCache
+from utils.hero_cache import HeroCache
 from utils.console import (
     Colors,
     print_section_header,

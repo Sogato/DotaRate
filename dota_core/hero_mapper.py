@@ -12,12 +12,16 @@
 - Кеширование результатов для повторных обращений
 """
 
+# Стандартные библиотеки
 from typing import Dict, Set, Any
+
+# Сторонние библиотеки
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from config import HEROES_DATABASE_URL
-from data_bases.heroes.models import Hero
+# Локальные импорты
+from dota_core.data_bases.heroes.models import Hero
+from dota_core.config import HEROES_DATABASE_URL
 
 
 class HeroMapper:

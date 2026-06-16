@@ -30,8 +30,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 
 # Локальные импорты
-from data_bases.heroes.models import Hero
-from config import HEROES_DATABASE_URL
+from dota_core.data_bases.heroes.models import Hero
+from dota_core.config import HEROES_DATABASE_URL
 from utils.console import (
     Colors,
     print_subsection_header,

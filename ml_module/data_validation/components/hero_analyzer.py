@@ -38,7 +38,7 @@ from sqlalchemy.orm import Session
 
 # Локальные импорты
 from data_validation.components.database_config import DatabaseConfig
-from dota_core.hero_cache import HeroCache
+from utils.hero_cache import HeroCache
 from utils.console import (
     Colors,
     print_subsection_header,

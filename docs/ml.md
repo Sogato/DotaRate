@@ -44,7 +44,7 @@ PRO_DB_NAME=...
 STEAM_API_KEY=...
 ```
 
-> **Нюанс импортов.** Скрипты создания/очистки баз импортируют свои модели локально (`from models import ...`), локальный `config` и `utils` — от корня `ml_module`, а общий код — из пакета `dota_core` от корня репозитория. Поэтому в `PYTHONPATH` должны быть доступны и корень репозитория (ради `dota_core`), и корень `ml_module`.
+> **Нюанс импортов.** Скрипты создания/очистки баз `dataset` и `pro_matches` импортируют свои модели локально (`from models import ...`), локальный `config` и `utils` — от корня `ml_module`, а общий код — из пакета `dota_core` от корня репозитория. Скрипты схемы для БД `heroes` живут целиком в `dota_core` (`dota_core/data_bases/heroes/`) и запускаются от корня репозитория. Поэтому в `PYTHONPATH` должны быть доступны и корень репозитория (ради `dota_core`), и корень `ml_module`.
 
 ## Порядок настройки
 
@@ -53,7 +53,7 @@ STEAM_API_KEY=...
 | № | Действие | Что запустить |
 |---|----------|---------------|
 | 0 | Создать три пустые базы в PostgreSQL с именами из `.env` (`dataset`, `heroes`, `pro_matches`) | — |
-| 1 | Применить схемы (создать таблицы) | `data_bases/heroes/create_heroes_db.py`, `data_bases/dataset/create_dataset_db.py`, `data_bases/pro_matches/create_pro_db.py` |
+| 1 | Применить схемы (создать таблицы) | `dota_core/data_bases/heroes/create_heroes_db.py`, `data_bases/dataset/create_dataset_db.py`, `data_bases/pro_matches/create_pro_db.py` |
 | 2 | Заполнить справочник героев | `data_collection/heroes_data_loader.py` |
 | 3 | Собрать матчи (самая долгая стадия) | `data_collection/data_collector.py`, `data_collection/data_collector_pro.py` |
 | 4 | Провалидировать собранные данные | `data_validation/data_validator.py` (интерактивное меню) |
@@ -96,7 +96,17 @@ STEAM_API_KEY=...
 
 ## Утилиты (`utils/`)
 
-Вспомогательные модули ML-модуля. Это локальные утилиты только для этого модуля; доменные сущности `HeroMapper` и `HeroCache` вынесены в общий пакет `dota_core` и описаны в [`shared.md`](shared.md).
+Вспомогательные модули ML-модуля.
+
+### `hero_cache.py` ✅
+
+Класс `HeroCache` — кэш справочных имён героев для быстрого O(1)-доступа.
+
+- Данные загружаются **только** при явном вызове `initialize()`, который читает все записи из БД `heroes` (модель `Hero` из `dota_core`, см. [`shared.md`](shared.md)) и строит in-memory словарь `{hero_id: localized_name}`.
+- Повторные вызовы `initialize()` безопасны (загрузка не дублируется).
+- `get_hero_name(hero_id)` никогда не падает: для неизвестных ID возвращает строку-заглушку `"Unknown Hero (ID: X)"`.
+
+Поскольку БД героев статична во время работы, кэш служит источником истины для имён в пределах одного запуска.
 
 ### `console.py` ✅
 
@@ -118,17 +128,14 @@ STEAM_API_KEY=...
 
 ## Стадия 1. Базы данных (`data_bases/`)
 
-Модуль хранения. Содержит три независимых пакета — по одному на каждую базу. У каждого пакета свои SQLAlchemy-модели (`models.py`) с **собственным** `declarative_base()`, а также скрипты создания и очистки.
+Модуль хранения. Содержит два независимых пакета — по одному на каждую базу матчей. У каждого пакета свои SQLAlchemy-модели (`models.py`) с **собственным** `declarative_base()`, а также скрипты создания и очистки. Справочная БД `heroes` к модулю не относится — она вынесена в `dota_core/data_bases/heroes/` как общий ресурс (модель `Hero` и её скрипты описаны в [`shared.md`](shared.md)).
 
 | Пакет | База | Таблицы | Назначение |
 |-------|------|---------|------------|
 | `dataset/` | `dataset` | `matches`, `match_players` | Большой корпус обычных матчей для обучения |
-| `heroes/` | `heroes` | `heroes` | Статический справочник героев |
 | `pro_matches/` | `pro_matches` | `pro_matches`, `pro_match_players` | Профессиональные турнирные матчи |
 
 ### Схемы данных
-
-**`heroes` → модель `Hero`.** Справочник: `id`, системное имя `name`, отображаемое `localized_name`, основной атрибут `primary_attr` (`agi`/`str`/`int`/`all`), тип атаки `attack_type` (`Melee`/`Ranged`), роли `roles` (через запятую).
 
 **`dataset` → `Match` + `MatchPlayer`.** Один матч связан ровно с 10 игроками (один-ко-многим, каскадное удаление). `Match` хранит результат, длительность, время, битовые маски построек, тип лобби и режим, счёт команд. `MatchPlayer` — детальная статистика игрока: герой и его вариант, назначенная роль (`core`/`support`, Enum на уровне БД), предметы (6 основных слотов + 3 рюкзака + 2 нейтральных), боевая статистика (`kills`/`deaths`/`assists`/`kda`), экономика (`last_hits`, `denies`, `gold_per_min`, `xp_per_min`, `level`, `net_worth`) и наличие ключевых улучшений (Aghanim's Scepter/Shard, Moonshard).
 
