@@ -1,8 +1,8 @@
 """
-Скрипт очистки базы данных героев Dota 2.
+Скрипт очистки базы данных лиг Dota 2.
 
 Модуль предоставляет функционал для полной очистки всех таблиц базы данных
-heroes с сохранением структуры схемы. Используется TRUNCATE для удаления
+leagues с сохранением структуры схемы. Используется TRUNCATE для удаления
 всех записей и сброса AUTO_INCREMENT счетчиков.
 
 ВАЖНО: Операция необратима. Все данные будут удалены без возможности восстановления.
@@ -10,9 +10,8 @@ heroes с сохранением структуры схемы. Использу
 import sys
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
-from dota_core.data_bases.heroes.models import Hero
-from dota_core.config import HEROES_DATABASE_URL
-
+from dota_core.data_bases.leagues.models import League
+from dota_core.config import LEAGUES_DATABASE_URL
 from dota_core.utils.console import (
     print_section_header,
     print_subsection_header,
@@ -21,22 +20,16 @@ from dota_core.utils.console import (
     Colors
 )
 
-engine = create_engine(HEROES_DATABASE_URL)  # Engine для работы напрямую с БД
+engine = create_engine(LEAGUES_DATABASE_URL)  # Engine для работы напрямую с БД
 
 
 def clear_database() -> None:
     """
-    Полностью очищает все таблицы базы данных heroes.
+    Полностью очищает все таблицы базы данных leagues.
 
     Выполняет TRUNCATE для всех таблиц с сохранением структуры схемы
     и сбросом AUTO_INCREMENT счетчиков. Операция является транзакционной
     и выполняется атомарно - либо очищаются все таблицы, либо ни одна.
-
-    Последовательность действий:
-    1. Получение имени таблицы из модели SQLAlchemy
-    2. Открытие транзакции с автоматическим commit
-    3. TRUNCATE таблицы heroes
-    4. Автоматический commit при успешном выполнении
 
     Raises:
         SQLAlchemyError: При ошибках подключения или выполнения SQL
@@ -45,23 +38,23 @@ def clear_database() -> None:
     Note:
         При ошибке скрипт завершается с кодом 1 (sys.exit(1))
     """
-    print_section_header("ОЧИСТКА БАЗЫ ДАННЫХ ГЕРОЕВ", "🗑️", color=Colors.BRIGHT_RED)
+    print_section_header("ОЧИСТКА БАЗЫ ДАННЫХ ЛИГ", "🗑️", color=Colors.BRIGHT_RED)
 
     try:
         # Получаем имя таблицы из модели
-        hero_table = Hero.__tablename__
+        league_table = League.__tablename__
 
-        print_status_message("Очистка таблицы героев...", "warning", "⚠️")
+        print_status_message("Очистка таблицы лиг...", "warning", "⚠️")
 
         with engine.begin() as conn:
-            print_info_line("Очистка таблицы", hero_table, "🔄",
+            print_info_line("Очистка таблицы", league_table, "🔄",
                             Colors.BLUE_3, Colors.BRIGHT_YELLOW)
-            conn.execute(text(f'TRUNCATE TABLE "{hero_table}" RESTART IDENTITY CASCADE'))
+            conn.execute(text(f'TRUNCATE TABLE "{league_table}" RESTART IDENTITY CASCADE'))
 
-        print_status_message("Данные о героях успешно очищены!", "success", "✅")
+        print_status_message("Данные о лигах успешно очищены!", "success", "✅")
 
     except SQLAlchemyError as e:
-        print_status_message(f"Ошибка при очистке БД героев: {e}", "error", "❌")
+        print_status_message(f"Ошибка при очистке БД лиг: {e}", "error", "❌")
         sys.exit(1)
     except Exception as e:
         print_status_message(f"Неожиданная ошибка: {e}", "error", "💥")
@@ -70,9 +63,9 @@ def clear_database() -> None:
 
 def check_if_empty() -> None:
     """
-    Проверяет, пуста ли база данных героев после очистки.
+    Проверяет, пуста ли база данных лиг после очистки.
 
-    Выполняет подсчет записей в таблице heroes и выводит детальную
+    Выполняет подсчет записей в таблице leagues и выводит детальную
     статистику. Используется для верификации успешности операции очистки.
 
     Raises:
@@ -83,27 +76,27 @@ def check_if_empty() -> None:
         При ошибке скрипт завершается с кодом 1 (sys.exit(1))
     """
     print()
-    print_subsection_header("Проверка состояния БД героев", "🔍", Colors.BRIGHT_YELLOW)
+    print_subsection_header("Проверка состояния БД лиг", "🔍", Colors.BRIGHT_YELLOW)
 
     try:
-        hero_table = Hero.__tablename__
+        league_table = League.__tablename__
 
         with engine.connect() as conn:
-            # Подсчитываем количество героев в БД
-            hero_count = conn.execute(text(f'SELECT COUNT(*) FROM "{hero_table}"')).scalar()
+            # Подсчитываем количество лиг в БД
+            league_count = conn.execute(text(f'SELECT COUNT(*) FROM "{league_table}"')).scalar()
 
         # Выводим статистику
-        print_info_line("Героев в БД", f"{hero_count:,}", "⚔️",
+        print_info_line("Лиг в БД", f"{league_count:,}", "🏆",
                         Colors.BLUE_3, Colors.BRIGHT_CYAN)
 
         # Определяем и выводим результат проверки
-        if hero_count == 0:
-            print_status_message("База данных героев пуста", "success", "✅")
+        if league_count == 0:
+            print_status_message("База данных лиг пуста", "success", "✅")
         else:
-            print_status_message("База данных героев содержит данные", "warning", "⚠️")
+            print_status_message("База данных лиг содержит данные", "warning", "⚠️")
 
     except SQLAlchemyError as e:
-        print_status_message(f"Ошибка при проверке БД героев: {e}", "error", "❌")
+        print_status_message(f"Ошибка при проверке БД лиг: {e}", "error", "❌")
         sys.exit(1)
     except Exception as e:
         print_status_message(f"Неожиданная ошибка: {e}", "error", "💥")
@@ -112,7 +105,7 @@ def check_if_empty() -> None:
 
 def main() -> None:
     """
-    Главная функция для выполнения полной очистки и проверки БД heroes.
+    Главная функция для выполнения полной очистки и проверки БД leagues.
     """
     clear_database()
     check_if_empty()
