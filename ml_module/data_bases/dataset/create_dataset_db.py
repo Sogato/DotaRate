@@ -15,9 +15,9 @@
 import sys
 from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
-from models import Base
-from config import DATASET_DATABASE_URL
-from utils.console import (
+from ml_module.data_bases.dataset.models import Base
+from ml_module.config import DATASET_DATABASE_URL
+from dota_core.utils.console import (
     print_section_header,
     print_status_message,
     print_info_line,

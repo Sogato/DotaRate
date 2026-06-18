@@ -10,9 +10,9 @@ dataset с сохранением структуры схемы. Использ�
 import sys
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
-from config import DATASET_DATABASE_URL
-from models import Match, MatchPlayer
-from utils.console import (
+from ml_module.data_bases.dataset.models import Match, MatchPlayer
+from ml_module.config import DATASET_DATABASE_URL
+from dota_core.utils.console import (
     print_section_header,
     print_subsection_header,
     print_status_message,

@@ -17,7 +17,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 from models import Base
 from config import HEROES_DATABASE_URL
-from utils.console import (
+from dota_core.utils.console import (
     print_section_header,
     print_status_message,
     print_info_line,

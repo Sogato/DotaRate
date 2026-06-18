@@ -27,8 +27,8 @@ from sqlalchemy.exc import SQLAlchemyError
 
 # Локальные импорты
 from data_validation.components.database_config import DatabaseConfig
-from utils.time_utils import format_timestamp
-from utils.console import (
+from dota_core.utils.time_format import format_timestamp
+from dota_core.utils.console import (
     Colors,
     print_section_header,
     print_subsection_header,

@@ -54,8 +54,8 @@ from sklearn.metrics import r2_score
 
 # Локальные импорты
 from ml_training.data_loader_v1 import DataLoaderV1
-from config import DOTA_VERSION
-from utils.console import (
+from ml_module.config import DOTA_VERSION
+from dota_core.utils.console import (
     Colors,
     print_info_line,
     print_progress_bar,

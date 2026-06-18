@@ -47,7 +47,7 @@ from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.orm import sessionmaker
 
 # Локальные импорты
-from config import (
+from ml_module.config import (
     DATASET_DATABASE_URL,
     DIRE_INDEX,
     DOTA_VERSION,
@@ -57,7 +57,7 @@ from config import (
     TEAM_SIZE,
 )
 from data_bases.dataset.models import Match, MatchPlayer
-from utils.console import (
+from dota_core.utils.console import (
     Colors,
     print_info_line,
     print_progress_bar,
@@ -65,7 +65,7 @@ from utils.console import (
     print_status_message,
     print_subsection_header,
 )
-from dota_core.hero_mapper import HeroMapper
+from dota_core.utils.hero_mapper import HeroMapper
 
 # === НАСТРОЙКИ HDF5 ПРЕПРОЦЕССОРА ===
 HDF5_FILE_NAME = "HDF5_dataset"     # Базовое имя выходных файлов

@@ -44,8 +44,8 @@ from sqlalchemy.orm import Session
 
 # Локальные импорты
 from data_validation.components.database_config import DatabaseConfig
-from config import SERIES_TYPES
-from utils.console import (
+from ml_module.config import SERIES_TYPES
+from dota_core.utils.console import (
     Colors,
     print_subsection_header,
     print_info_line,

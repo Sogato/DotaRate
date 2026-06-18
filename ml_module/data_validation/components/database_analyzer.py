@@ -14,7 +14,7 @@ from sqlalchemy import func, text
 
 # Локальные импорты
 from data_validation.components.database_config import DatabaseConfig
-from utils.console import (
+from dota_core.utils.console import (
     Colors,
     print_section_header,
     print_info_line,

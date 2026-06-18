@@ -22,7 +22,7 @@ from keras import Model
 from keras.models import load_model
 
 # Локальные импорты
-from dota_core.hero_mapper import HeroMapper
+from dota_core.utils.hero_mapper import HeroMapper
 from dota_core.config import DOTA_VERSION, EXCLUDED_HERO_IDS, TEAM_SIZE
 
 # Текущие боевые версии предсказателей.

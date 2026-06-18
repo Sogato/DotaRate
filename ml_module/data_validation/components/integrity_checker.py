@@ -41,8 +41,8 @@ from sqlalchemy.orm import Session
 # Локальные импорты
 from data_validation.components.database_config import DatabaseConfig
 from data_validation.components.pro_analyzer import ProAnalyzer
-from config import TEAM_SIZE, RADIANT_INDEX, DIRE_INDEX, ROLE_MAPPING
-from utils.console import (
+from ml_module.config import TEAM_SIZE, RADIANT_INDEX, DIRE_INDEX, ROLE_MAPPING
+from dota_core.utils.console import (
     Colors,
     print_section_header,
     print_subsection_header,

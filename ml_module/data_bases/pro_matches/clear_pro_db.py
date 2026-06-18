@@ -10,9 +10,9 @@
 import sys
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
-from config import PRO_DATABASE_URL
-from models import ProMatch, ProMatchPlayer
-from utils.console import (
+from ml_module.data_bases.pro_matches.models import ProMatch, ProMatchPlayer
+from ml_module.config import PRO_DATABASE_URL
+from dota_core.utils.console import (
     print_section_header,
     print_subsection_header,
     print_status_message,

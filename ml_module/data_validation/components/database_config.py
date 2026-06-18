@@ -18,7 +18,7 @@ from typing import Type, Union
 # Локальные импорты
 from data_bases.dataset.models import Match, MatchPlayer
 from data_bases.pro_matches.models import ProMatch, ProMatchPlayer
-from config import DATASET_DATABASE_URL, PRO_DATABASE_URL
+from ml_module.config import DATASET_DATABASE_URL, PRO_DATABASE_URL
 
 
 @dataclass

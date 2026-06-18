@@ -38,8 +38,8 @@ from sqlalchemy.orm import Session
 
 # Локальные импорты
 from data_validation.components.database_config import DatabaseConfig
-from utils.hero_cache import HeroCache
-from utils.console import (
+from dota_core.utils.hero_cache import HeroCache
+from dota_core.utils.console import (
     Colors,
     print_subsection_header,
     print_info_line,

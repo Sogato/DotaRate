@@ -34,14 +34,14 @@ from sqlalchemy.exc import IntegrityError
 
 # Локальные импорты
 from data_bases.dataset.models import Match, MatchPlayer
-from config import (
+from ml_module.config import (
     DATASET_DATABASE_URL, STEAM_API_MATCH_HISTORY_URL, STEAM_API_KEY, STARTING_MATCH_SEQUENCE_NUMBER,
     BURST_TIME_TIMESTAMP, MINIMUM_MATCH_DURATION, TEAM_SIZE, RADIANT_INDEX, DIRE_INDEX, PLAYER_SLOT_TEAM_BITMASK,
     REQUIRED_PLAYER_FIELDS, REQUIRED_MATCH_FIELDS, ALLOWED_GAME_MODES, ALLOWED_LOBBY_TYPES, VALID_LEAVER_STATUSES,
     SUPPORT_ITEM_IDS, HERO_ITEM_EXCEPTIONS, HERO_SUPPORT_SCORE_EXCEPTIONS, HERO_RUINER_EXCEPTIONS,
 )
-from utils.hero_cache import HeroCache
-from utils.console import (
+from dota_core.utils.hero_cache import HeroCache
+from dota_core.utils.console import (
     Colors,
     print_section_header,
     print_subsection_header,

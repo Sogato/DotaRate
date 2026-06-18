@@ -32,7 +32,7 @@ from sqlalchemy.orm import sessionmaker, Session
 # Локальные импорты
 from dota_core.data_bases.heroes.models import Hero
 from dota_core.config import HEROES_DATABASE_URL
-from utils.console import (
+from dota_core.utils.console import (
     Colors,
     print_subsection_header,
     print_info_line,
