@@ -2,6 +2,12 @@
 """Django's command-line utility for administrative tasks."""
 import os
 import sys
+import logging
+
+# Гасим служебный вывод TensorFlow до его импорта
+os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '1')
+os.environ.setdefault('TF_ENABLE_ONEDNN_OPTS', '0')
+logging.getLogger('tensorflow').setLevel(logging.ERROR)
 
 
 def main():

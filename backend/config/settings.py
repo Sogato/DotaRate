@@ -138,3 +138,17 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+
+
+# ML / Модели предсказаний
+# Считываются на старте сервера в matches.state.load().
+
+# Каталог с обученными моделями: MODELS_DIR/<тип>/*.keras
+MODELS_DIR = BASE_DIR / 'matches' / 'inference' / 'models'
+
+# Действующие версии моделей: тип -> версия.
+MODEL_VERSIONS = {
+    'win': 'v1',
+    'time': 'v1',
+    'score': 'v1',
+}

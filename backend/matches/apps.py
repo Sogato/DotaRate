@@ -9,16 +9,16 @@ class MatchesConfig(AppConfig):
     verbose_name = 'Матчи'
 
     def ready(self):
-        # ready() вызывается при любом запуске Django (migrate, shell и т.д.).
-        # Keras-модели нужны только серверу, поэтому отсекаем остальное.
+        # Состояние нужно только серверу, поэтому остальные команды
+        # (migrate, shell и т.д.) пропускаем.
         if 'runserver' not in sys.argv:
             return
 
-        # При автоперезагрузке модели грузит только рабочий процесс (RUN_MAIN);
-        # при --noreload процесс один. Иначе загрузка дублируется.
+        # runserver с автоперезагрузкой поднимает два процесса; грузим состояние
+        # только в рабочем (RUN_MAIN), при --noreload процесс один.
         if not (os.environ.get('RUN_MAIN') == 'true' or '--noreload' in sys.argv):
             return
 
-        # Импорт отложен: на уровне модуля приложения и HeroMapper ещё не готовы.
-        from .ml import match_predictor
-        match_predictor.load()
+        # Импорт отложен: на уровне модуля зависимости состояния ещё не готовы.
+        from . import shared_resources
+        shared_resources.load()
