@@ -2,10 +2,10 @@
 Настройка панели администрирования приложения matches.
 
 Админка задумана как обзорная панель: данные наполняет сборщик, поэтому
-фактические показатели матча (счёт, ценность, тайминги, прогнозы) доступны
-только для чтения, а управляющие поля (доступность ставок, коэффициенты,
-признак трансляции, событие Winline) оставлены редактируемыми для ручной
-корректировки.
+фактические показатели матча (счёт, ценность, тайминги, прогнозы, результат)
+доступны только для чтения, а управляющие поля (доступность ставок,
+коэффициенты, признак трансляции, событие Winline) оставлены редактируемыми
+для ручной корректировки.
 
 Имена героев в составе берутся из справочника HeroCache (shared_resources), загруженного при старте сервера.
 """
@@ -27,6 +27,7 @@ admin.site.index_title = 'Управление данными'
 def _hero_name(hero_id: int) -> str:
     """Локализованное имя героя из справочника shared_resources."""
     return shared_resources.get_hero_cache().get_hero_name(hero_id)
+
 
 class PlayerInline(admin.TabularInline):
     """Состав команд внутри карточки матча."""
@@ -70,8 +71,10 @@ class MatchAdmin(admin.ModelAdmin):
         'league_name',
         'score',
         'bet_state',
+        'coefficients',
         'is_live',
         'win_prediction',
+        'result',
         'start_time',
     )
     list_display_links = ('match_id',)
@@ -122,7 +125,7 @@ class MatchAdmin(admin.ModelAdmin):
         ('Тайминги', {
             'fields': ('start_time', 'end_time', 'stream_delay_s'),
         }),
-        ('«Игровые показатели', {
+        ('Игровые показатели', {
             'fields': (
                 'duration',
                 'radiant_score', 'dire_score',
@@ -175,6 +178,28 @@ class MatchAdmin(admin.ModelAdmin):
         label, color = states[obj.bet_status]
         return format_html('<b style="color: {}; white-space: nowrap">{}</b>', color, label)
 
+    @admin.display(description='Коэф R/D')
+    def coefficients(self, obj):
+        """Коэффициенты Radiant и Dire одной компактной колонкой.
+
+        У завершённого матча (radiant_win задан) коэффициент победившей стороны выделяется жирным.
+        """
+        r, d = obj.radiant_team_coefficient, obj.dire_team_coefficient
+        if r is None and d is None:
+            return '—'
+
+        def cell(coef, is_winner):
+            if coef is None:
+                return format_html('—')
+            tpl = '<b>{}</b>' if is_winner else '{}'
+            return format_html(tpl, f'{coef:.2f}')
+
+        return format_html(
+            '<span style="white-space: nowrap">{} / {}</span>',
+            cell(r, obj.radiant_win is True),
+            cell(d, obj.radiant_win is False),
+        )
+
     @admin.display(description='Live', boolean=True, ordering='live_status')
     def is_live(self, obj):
         """Признак активной трансляции."""
@@ -192,6 +217,16 @@ class MatchAdmin(admin.ModelAdmin):
         return format_html(
             '<span style="white-space: nowrap">{} {}%</span>',
             team, f'{chance * 100:.0f}',
+        )
+
+    @admin.display(description='Результат', ordering='radiant_win')
+    def result(self, obj):
+        """Фактический итог матча: победившая сторона."""
+        if obj.radiant_win is None:
+            return '—'
+        team, color = ('Radiant', '#1a7f37') if obj.radiant_win else ('Dire', '#cf222e')
+        return format_html(
+            '<b style="color: {}; white-space: nowrap">{}</b>', color, team,
         )
 
 
