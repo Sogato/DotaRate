@@ -68,7 +68,7 @@ def load() -> None:
 
     # Состояние строится строго один раз на процесс.
     if _loaded:
-        print_status_message("state.load() вызван повторно — загрузка пропущена", "warning", "⚠️")
+        print_status_message("shared_resources.load() вызван повторно, загрузка пропущена", "warning", "⚠️")
         return
 
     print_section_header("ИНИЦИАЛИЗАЦИЯ СОСТОЯНИЯ СИСТЕМЫ", "🤖", width=100, color=Colors.BRIGHT_GOLD)
@@ -170,7 +170,7 @@ def _ensure_loaded() -> None:
     """
     if not _loaded:
         raise RuntimeError(
-            "Состояние не загружено. Вызовите state.load() при старте сервера."
+            "Состояние не загружено. Вызовите shared_resources.load() при старте сервера."
         )
 
 

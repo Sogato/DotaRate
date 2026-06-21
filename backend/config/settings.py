@@ -141,7 +141,7 @@ STATIC_URL = 'static/'
 
 
 # ML / Модели предсказаний
-# Считываются на старте сервера в matches.state.load().
+# Считываются на старте сервера в matches.shared_resources.load().
 
 # Каталог с обученными моделями: MODELS_DIR/<тип>/*.keras
 MODELS_DIR = BASE_DIR / 'matches' / 'inference' / 'models'
