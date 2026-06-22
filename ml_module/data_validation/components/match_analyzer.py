@@ -58,12 +58,12 @@ from sqlalchemy.orm import Session
 
 # Локальные импорты
 from data_validation.components.database_config import DatabaseConfig
-from config import (
+from ml_module.config import (
     TOWERS_BITMASK, BARRACKS_BITMASK, TOWERS_COUNT, BARRACKS_COUNT, TOWER_NAMES,
     TOWER_BIT_POSITIONS, BARRACKS_NAMES, GAME_MODES, LOBBY_TYPES,
 )
-from utils.time_utils import format_timestamp
-from utils.console import (
+from dota_core.utils.time_format import format_timestamp
+from dota_core.utils.console import (
     Colors,
     print_section_header,
     print_subsection_header,

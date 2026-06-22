@@ -22,9 +22,9 @@ from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import SQLAlchemyError
 
 # Локальные импорты
-from data_bases.heroes.models import Hero
-from config import HEROES_DATABASE_URL, OPENDOTA_HEROES_API
-from utils.console import (
+from dota_core.data_bases.heroes.models import Hero
+from dota_core.config import HEROES_DATABASE_URL, OPENDOTA_HEROES_API
+from dota_core.utils.console import (
     print_section_header,
     print_subsection_header,
     print_status_message,

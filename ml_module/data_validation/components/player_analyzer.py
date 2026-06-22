@@ -50,8 +50,8 @@ from sqlalchemy.orm import Session
 
 # Локальные импорты
 from data_validation.components.database_config import DatabaseConfig
-from config import PRIVATE_ACCOUNT_ID
-from utils.console import (
+from ml_module.config import PRIVATE_ACCOUNT_ID
+from dota_core.utils.console import (
     Colors,
     print_section_header,
     print_subsection_header,

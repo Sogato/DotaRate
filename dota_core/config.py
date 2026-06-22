@@ -29,15 +29,17 @@ DB_HOST = _os.getenv('DB_HOST')
 DB_PORT = _os.getenv('DB_PORT')
 
 # Названия баз данных
-DATASET_DB_NAME = _os.getenv('DATASET_DB_NAME')  # Основная БД с матчами
+BACKEND_DB_NAME = _os.getenv('BACKEND_DB_NAME')  # БД backend
 HEROES_DB_NAME = _os.getenv('HEROES_DB_NAME')    # Справочник героев
+LEAGUES_DB_NAME = _os.getenv('LEAGUES_DB_NAME')  # Справочник лиг
+DATASET_DB_NAME = _os.getenv('DATASET_DB_NAME')  # Основная БД с матчами
 PRO_DB_NAME = _os.getenv('PRO_DB_NAME')          # БД профессиональных матчей
 
 # Строки подключения (PostgreSQL URI)
-DATASET_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DATASET_DB_NAME}"
 HEROES_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{HEROES_DB_NAME}"
+LEAGUES_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{LEAGUES_DB_NAME}"
+DATASET_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DATASET_DB_NAME}"
 PRO_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{PRO_DB_NAME}"
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ВНЕШНИЕ API
@@ -49,6 +51,7 @@ STEAM_API_MATCH_HISTORY_URL = "https://api.steampowered.com/IDOTA2Match_570/GetM
 
 # OpenDota API
 OPENDOTA_HEROES_API = "https://api.opendota.com/api/heroes"
+OPENDOTA_LEAGUES_API = "https://api.opendota.com/api/leagues"
 OPENDOTA_PRO_MATCHES_URL = "https://api.opendota.com/api/proMatches"
 OPENDOTA_MATCH_DETAILS_URL = "https://api.opendota.com/api/matches"
 

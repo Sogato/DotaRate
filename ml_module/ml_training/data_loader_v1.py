@@ -46,16 +46,16 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 # Локальные импорты
-from dota_core.hero_mapper import HeroMapper
+from dota_core.utils.hero_mapper import HeroMapper
 from data_bases.pro_matches.models import ProMatch, ProMatchPlayer
-from config import (
+from ml_module.config import (
     DIRE_INDEX,
     EXCLUDED_HERO_IDS,
     PRO_DATABASE_URL,
     RADIANT_INDEX,
     TEAM_SIZE,
 )
-from utils.console import (
+from dota_core.utils.console import (
     Colors,
     print_info_line,
     print_subsection_header,

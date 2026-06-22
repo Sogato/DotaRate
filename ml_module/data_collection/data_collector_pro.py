@@ -76,13 +76,13 @@ from sqlalchemy.exc import IntegrityError
 
 # Локальные импорты
 from data_bases.pro_matches.models import ProMatch, ProMatchPlayer
-from config import (
+from ml_module.config import (
     PRO_DATABASE_URL, OPENDOTA_PRO_MATCHES_URL, OPENDOTA_MATCH_DETAILS_URL, BURST_TIME_TIMESTAMP,
     TEAM_SIZE, RADIANT_INDEX, DIRE_INDEX, PLAYER_SLOT_TEAM_BITMASK, SERIES_TYPES, VALID_LEAVER_STATUSES,
     SUPPORT_ITEM_IDS, HERO_ITEM_EXCEPTIONS, HERO_SUPPORT_SCORE_EXCEPTIONS
 )
-from dota_core.hero_cache import HeroCache
-from utils.console import (
+from dota_core.utils.hero_cache import HeroCache
+from dota_core.utils.console import (
     Colors,
     print_section_header,
     print_subsection_header,

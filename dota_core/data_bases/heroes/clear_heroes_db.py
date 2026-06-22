@@ -10,9 +10,10 @@ heroes с сохранением структуры схемы. Использу
 import sys
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
-from config import HEROES_DATABASE_URL
-from models import Hero
-from utils.console import (
+from dota_core.data_bases.heroes.models import Hero
+from dota_core.config import HEROES_DATABASE_URL
+
+from dota_core.utils.console import (
     print_section_header,
     print_subsection_header,
     print_status_message,
