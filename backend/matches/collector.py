@@ -74,13 +74,6 @@ REQUIRED_KEYS = frozenset((
     "stream_delay_s", "radiant_series_wins", "dire_series_wins",
 ))
 
-# Команды, чьи матчи не обрабатываем (сравнение в нижнем регистре).
-BLACKLIST_TEAMS = frozenset((
-    "team spirt",
-    "teamspirt",
-))
-
-
 # ────────────────────────────────────────────────────────────────────────────
 # Стадия 1. Steam-клиент: получение сырых данных
 # ────────────────────────────────────────────────────────────────────────────
@@ -220,11 +213,8 @@ def _process_new_match(game: dict) -> bool:
 
     radiant_name = game["radiant_team"]["team_name"]
     dire_name = game["dire_team"]["team_name"]
-    if _is_blacklisted(radiant_name) or _is_blacklisted(dire_name):
-        logger.info("Матч %s исключён (чёрный список)", game["match_id"])
-        return False
-
     event_id = winline_parser.resolve_event_id(radiant_name, dire_name)
+
     if event_id is None:
         # Матча нет в линии Winline — ставок не будет.
         _persist_skeleton(game, radiant_name, dire_name, event_id=None, bet_status=False)
@@ -240,11 +230,6 @@ def _is_full_draft(game: dict) -> bool:
     """Завершён ли драфт: выбрано по TEAM_SIZE героев на каждую сторону."""
     picked = sum(1 for p in game["players"] if p.get("hero_id", 0) != 0)
     return picked == TEAM_SIZE * 2
-
-
-def _is_blacklisted(team_name: str) -> bool:
-    """Находится ли команда в чёрном списке."""
-    return team_name.lower() in BLACKLIST_TEAMS
 
 
 # ────────────────────────────────────────────────────────────────────────────
