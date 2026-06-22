@@ -14,7 +14,7 @@ publication), которые нужны сериализатору.
 
 # Стандартные библиотеки
 import logging
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 
 # Сторонние библиотеки
 from django.db.models import Q
@@ -155,23 +155,20 @@ class LastWeekMatchList(generics.ListAPIView):
         ).order_by('start_time')
 
 
-def days_in_previous_month() -> int:
-    """Число дней в предыдущем календарном месяце."""
-    today = timezone.now().date()
-    first_day_of_current_month = today.replace(day=1)
-    last_day_of_previous_month = first_day_of_current_month - timedelta(days=1)
-    return last_day_of_previous_month.day
-
-
 class LastMonthMatchList(generics.ListAPIView):
-    """Матчи, завершившиеся за период, равный длине предыдущего месяца."""
+    """Матчи, завершившиеся в предыдущем календарном месяце."""
     serializer_class = MatchSerializer
 
     def get_queryset(self):
-        now = timezone.now()
-        month_ago = now - timedelta(days=days_in_previous_month())
+        today = timezone.now().date()
+        first_of_this_month = today.replace(day=1)
+        first_of_prev = (first_of_this_month - timedelta(days=1)).replace(day=1)
+
+        start = timezone.make_aware(datetime.combine(first_of_prev, time.min))
+        end = timezone.make_aware(datetime.combine(first_of_this_month, time.min))
+
         return _match_queryset().filter(
-            end_time__range=(month_ago, now)
+            end_time__gte=start, end_time__lt=end
         ).order_by('start_time')
 
 
