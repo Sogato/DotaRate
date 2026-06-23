@@ -20,7 +20,7 @@
     None     — событие найдено (winline_event_id записан), но коэффициенты ещё
                закрыты, каждый проход пробуем их получить.
     True     — коэффициенты получены, прогноз построен, матч активен; обновляем
-               счёт и new worth по ходу игры.
+               счёт и net worth по ходу игры.
 
 Статические данные и модели поднимаются на старте сервера.
 
@@ -336,8 +336,12 @@ def _update_from_secondary(match_id: int, secondary: List[List[dict]]) -> bool:
     """
     Обновляет ход игры по вторичным источникам (top-live), если матч там есть.
 
-    Top-live отдаёт перевес Radiant (radiant_lead), а не суммарную ценность
-    команд, поэтому net_worth_dire здесь всегда 0.
+    Top-live отдаёт не суммарную ценность команд, а перевес Radiant
+    (radiant_lead), который может быть отрицательным при лидерстве Dire. Поскольку
+    оба поля net_worth неотрицательны, перевес зеркалится по сторонам: при лидерстве
+    Radiant он кладётся в net_worth_radiant (net_worth_dire=0), при лидерстве Dire —
+    наоборот. Знак, таким образом, кодируется тем, какое из полей ненулевое, а
+    их разность net_worth_radiant - net_worth_dire равна исходному radiant_lead.
 
     Returns:
         bool: True, если матч найден во вторичном источнике и обновлён
@@ -347,13 +351,14 @@ def _update_from_secondary(match_id: int, secondary: List[List[dict]]) -> bool:
             if int(entry.get("match_id", 0)) != match_id:
                 continue
             try:
+                lead = entry["radiant_lead"]
                 _write_progress(
                     match_id,
                     duration=entry["game_time"],
                     radiant_score=entry["radiant_score"],
                     dire_score=entry["dire_score"],
-                    net_worth_radiant=entry["radiant_lead"],
-                    net_worth_dire=0,
+                    net_worth_radiant=max(lead, 0),
+                    net_worth_dire=max(-lead, 0),
                 )
             except KeyError as exc:
                 logger.warning("Матч %s: неполные данные top-live, поле %s", match_id, exc)
