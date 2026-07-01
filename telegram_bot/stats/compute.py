@@ -5,9 +5,9 @@
 (DEFAULT_CONFIDENCE_THRESHOLDS) считает долю верных прогнозов и моделирует две
 стратегии ставок: фиксированную (постоянная ставка) и банковскую (процент от
 текущего банка, с капитализацией). Результат возвращается словарём — рисует
-график и постит его в Telegram уже stats_publisher.
+график и постит его в Telegram уже stats.publisher.
 
-Расчёт выполняет compute_stats; обёртки daily/weekly/monthly/all_time/league/
+Расчёт выполняет build; обёртки daily/weekly/monthly/all_time/league/
 except_league получают для него матчи через api_client и подписывают отчёт
 заголовком своего периода. Даты в заголовках выводятся из даты сервера;
 когда именно запускать отчёты — забота расписания, не этого модуля.
@@ -20,9 +20,7 @@ from typing import List, Optional
 
 # Локальные импорты
 from dota_core.config import DOTA_VERSION
-
-from . import api_client
-from . import config
+from .. import api_client, config
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +40,9 @@ _MONTHS_NOMINATIVE = (
 DEFAULT_CONFIDENCE_THRESHOLDS = [0.5, 0.55, 0.6, 0.65, 0.7]
 
 
-# ════════════════════════════════════════════════════════════════════════════
+# ────────────────────────────────────────────────────────────────────────────
 # Обёртки по периодам и лигам (точки входа для планировщика и ручных вызовов)
-# ════════════════════════════════════════════════════════════════════════════
+# ────────────────────────────────────────────────────────────────────────────
 
 def daily() -> Optional[dict]:
     """Статистика за прошедшие сутки."""
@@ -54,7 +52,7 @@ def daily() -> Optional[dict]:
         return None
     day = date.today() - timedelta(days=1)
     title = f"Статистика за {day.day} {_MONTHS_GENITIVE[day.month - 1]} {day.year} года"
-    return compute_stats(matches, title)
+    return build(matches, title)
 
 
 def weekly() -> Optional[dict]:
@@ -69,7 +67,7 @@ def weekly() -> Optional[dict]:
         f"Статистика с {start.day} {_MONTHS_GENITIVE[start.month - 1]} {start.year} года "
         f"по {end.day} {_MONTHS_GENITIVE[end.month - 1]} {end.year} года"
     )
-    return compute_stats(matches, title)
+    return build(matches, title)
 
 
 def monthly() -> Optional[dict]:
@@ -82,7 +80,7 @@ def monthly() -> Optional[dict]:
     last_day_prev_month = date.today().replace(day=1) - timedelta(days=1)
     month_name = _MONTHS_NOMINATIVE[last_day_prev_month.month - 1].title()
     title = f"Статистика за {month_name} {last_day_prev_month.year} года"
-    return compute_stats(matches, title)
+    return build(matches, title)
 
 
 def all_time() -> Optional[dict]:
@@ -92,7 +90,7 @@ def all_time() -> Optional[dict]:
         logger.warning("Статистика за всё время: матчи не получены")
         return None
     title = f"Статистика патча {DOTA_VERSION}"
-    return compute_stats(matches, title)
+    return build(matches, title)
 
 
 def league(league_id: int) -> Optional[dict]:
@@ -103,7 +101,7 @@ def league(league_id: int) -> Optional[dict]:
         return None
     league_name = matches[0]['league_name'] if matches else None
     title = f"Статистика {league_name}" if league_name else f"Статистика лиги {league_id}"
-    return compute_stats(matches, title)
+    return build(matches, title)
 
 
 def except_league(league_id: int) -> Optional[dict]:
@@ -118,14 +116,14 @@ def except_league(league_id: int) -> Optional[dict]:
         logger.warning("Статистика без лиги %s: матчи не получены", league_id)
         return None
     title = f"Статистика всех лиг, кроме лиги {league_id}"
-    return compute_stats(matches, title)
+    return build(matches, title)
 
 
-# ════════════════════════════════════════════════════════════════════════════
+# ────────────────────────────────────────────────────────────────────────────
 # Расчётное ядро
-# ════════════════════════════════════════════════════════════════════════════
+# ────────────────────────────────────────────────────────────────────────────
 
-def compute_stats(matches: List[dict], title: str) -> dict:
+def build(matches: List[dict], title: str) -> dict:
     """
     Считает точность прогнозов и симулирует ставки по всем порогам.
 
@@ -209,9 +207,9 @@ def compute_stats(matches: List[dict], title: str) -> dict:
     return {"title": title, "thresholds": threshold_stats}
 
 
-# ════════════════════════════════════════════════════════════════════════════
+# ────────────────────────────────────────────────────────────────────────────
 # Текстовая подпись
-# ════════════════════════════════════════════════════════════════════════════
+# ────────────────────────────────────────────────────────────────────────────
 
 def format_caption(result: dict) -> str:
     """

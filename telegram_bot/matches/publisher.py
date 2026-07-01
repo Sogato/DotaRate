@@ -1,5 +1,5 @@
 """
-Основной цикл публикации матчей в Telegram.
+Основной цикл публикации матчей в Telegram-канале.
 
 Каждые несколько секунд бот запускает сбор данных на backend, забирает
 список матчей и для каждого решает: опубликовать новое сообщение,
@@ -26,9 +26,9 @@ from telebot.apihelper import ApiException
 
 # Локальные импорты
 from dota_core.utils.hero_cache import HeroCache
-from . import api_client
-from .config import BOT, TELEGRAM_CHAT_ID, PUBLISH_WIN_THRESHOLD
-from .formatter import format_match_message
+from .. import api_client
+from ..config import BOT, TELEGRAM_CHAT_ID, PUBLISH_WIN_THRESHOLD
+from . import message
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +41,12 @@ _last_text: Dict[int, str] = {}
 
 def run(hero_cache: HeroCache) -> None:
     """
-    Запускает бесконечный цикл публикации. Возврата нет — выход по прерыванию.
+    Запускает бесконечный цикл публикации матчей. Возврата нет — выход по прерыванию.
 
     Args:
         hero_cache (HeroCache): Готовый справочник имён героев для формирования сообщений
     """
-    logger.info("Бот запущен, вход в цикл публикации")
+    logger.info("Бот запущен, вход в цикл публикации матчей")
     while True:
         try:
             _poll(hero_cache)
@@ -99,21 +99,21 @@ def _publish(match: dict, hero_cache: HeroCache) -> None:
     """
     Публикует новое сообщение о матче и сохраняет его id на backend.
 
-    refresh_flag=True переводит матч в режим обновления: на следующих проходах он попадёт в ветку редактирования.
+    refresh_flag=True переводит матч в режим обновления: на следующих прохода он попадёт в ветку редактирования.
     """
     match_id = match['match_id']
-    text = format_match_message(match, hero_cache)
+    text = message.build(match, hero_cache)
 
     try:
-        message = BOT.send_message(TELEGRAM_CHAT_ID, text)
+        sent = BOT.send_message(TELEGRAM_CHAT_ID, text)
     except ApiException as exc:
         logger.warning("Матч %s: не удалось отправить сообщение: %s", match_id, exc)
         return
 
-    saved = api_client.set_telegram_message_id(match_id, message.message_id, refresh_flag=True)
+    saved = api_client.set_telegram_message_id(match_id, sent.message_id, refresh_flag=True)
     if saved:
         _last_text[match_id] = text
-        logger.info("Матч %s опубликован (message_id=%s)", match_id, message.message_id)
+        logger.info("Матч %s опубликован (message_id=%s)", match_id, sent.message_id)
     else:
         # Сообщение в канале есть, но backend не сохранил его id. На следующем
         # проходе матч снова окажется без telegram_message_id — если backend не
@@ -140,7 +140,7 @@ def _edit(match: dict, hero_cache: HeroCache) -> None:
         logger.warning("Матч %s: стоит refresh_flag, но нет message_id", match_id)
         return
 
-    text = format_match_message(match, hero_cache)
+    text = message.build(match, hero_cache)
 
     if _last_text.get(match_id) != text:
         try:
@@ -154,11 +154,12 @@ def _edit(match: dict, hero_cache: HeroCache) -> None:
                 logger.debug("Матч %s: Telegram счёл сообщение неизменным", match_id)
                 _last_text[match_id] = text
             else:
-                # Правка не дошла до Telegram. Выходим, не трогая флаг: следующий проход попробует снова.
+                # Правка не дошла до Telegram. Выходим, не трогая флаг:
+                # следующий проход попробует снова.
                 logger.warning("Матч %s: не удалось отредактировать: %s", match_id, exc)
                 return
 
-    # Правка не дошла до Telegram. Выходим, не трогая флаг: следующий проход попробует снова.
+    # Исход известен — финальная правка сделана, матч больше не ведётся.
     if match['radiant_win'] is not None:
         if api_client.reset_refresh_flag(match_id):
             _last_text.pop(match_id, None)
@@ -169,8 +170,9 @@ def _should_publish(match: dict) -> bool:
     """
     Проходит ли матч порог уверенности прогноза для публикации.
 
-    PUBLISH_WIN_THRESHOLD=None публикует все матчи. Иначе матч публикуется только
-    при уверенном прогнозе в любую сторону (см. описание константы в config).
+    PUBLISH_WIN_THRESHOLD=None публикует все матчи. Иначе матч публикуется
+    только при уверенном прогнозе в любую сторону (см. описание константы
+    в config).
     """
     if PUBLISH_WIN_THRESHOLD is None:
         return True

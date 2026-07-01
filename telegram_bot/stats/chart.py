@@ -1,5 +1,5 @@
 """
-Построение графика статистики для Telegram-бота.
+Построение графика отчёта статистики для Telegram-бота.
 
 Рисует одну столбчатую диаграмму точности прогнозов по порогам уверенности и
 возвращает PNG в памяти (BytesIO): на диск ничего не пишется, картинка живёт
@@ -33,13 +33,12 @@ def render(result: dict, colors: list) -> BytesIO:
     Рисует график отчёта и возвращает его в виде PNG в памяти.
 
     Args:
-        result (dict): Результат stats.compute_stats — {"title", "thresholds"}
+        result (dict): Результат compute.build — {"title", "thresholds"}
         colors (list): Пара [фон, акцент] в HEX для конкретного вида отчёта
 
     Returns:
         BytesIO: Буфер с PNG, перемотанный в начало. На диск не пишется.
     """
-
     title = result["title"]
     categories = [t["label"] for t in result["thresholds"]]
     num_matches = [t["total"] for t in result["thresholds"]]
@@ -56,8 +55,8 @@ def render(result: dict, colors: list) -> BytesIO:
     ax.set_ylabel("Количество матчей", fontdict=_FONT_LABEL)
     ax.tick_params(axis="both", labelsize=12)
 
-    # На каждом пороге два наложенных столбца: фоновый во всю высоту, это все матчи,
-    # поверх него столбец пониже, это сколько из них предсказано верно.
+    # На каждом пороге два наложенных столбца: фоновый во всю высоту, это все
+    # матчи, поверх него столбец пониже, это сколько из них предсказано верно.
     correct_matches = [n * p / 100 for n, p in zip(num_matches, percent_correct)]
     ax.bar(categories, num_matches, color=matches_color, edgecolor="black", linewidth=2,
            zorder=2, label="Количество проанализированных игр")
@@ -79,8 +78,9 @@ def _annotate(ax, categories: list, num_matches: list, percent_correct: list) ->
     """
     Подписывает на столбцах число матчей и процент верных прогнозов.
 
-    Число матчей ставится у верхушки фонового столбца, а процент — внутри столбца
-    верных прогнозов либо над ним, если тот слишком низкий для подписи внутри.
+    Число матчей ставится у верхушки фонового столбца, а процент — внутри
+    столбца верных прогнозов либо над ним, если тот слишком низкий для
+    подписи внутри.
     """
     # Единица отступа подписей — 2% от высоты самого высокого столбца.
     offset = (max(num_matches) or 1) * 0.02
