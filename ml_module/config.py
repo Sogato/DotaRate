@@ -152,5 +152,5 @@ ROLE_MAPPING = {
 
 # Позволяет игнорировать определённые компоненты при расчёте ruiner_index для героев с нестандартной игровой механикой
 HERO_RUINER_EXCEPTIONS = {
-    (73, 3): {'income_score'}  # Alchemist (ID: 73) variant 3 - игнорирует income_score
+    # (73, 3): {'income_score'}  # Alchemist (ID: 73) variant 3 - игнорирует income_score
 }
