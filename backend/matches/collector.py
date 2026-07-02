@@ -67,7 +67,6 @@ MATCH_HISTORY_BY_SEQ_URL = f"https://api.steampowered.com/IDOTA2Match_570/GetMat
 
 # Сетевые параметры запросов к Steam.
 REQUEST_TIMEOUT = 30   # секунд на ответ
-REQUEST_RETRIES = 3    # повторов при сетевой ошибке
 
 # Ключи, без которых live-матч не имеет смысла обрабатывать.
 REQUIRED_KEYS = frozenset((
@@ -79,11 +78,14 @@ REQUIRED_KEYS = frozenset((
 # Стадия 1. Steam-клиент: получение сырых данных
 # ────────────────────────────────────────────────────────────────────────────
 
+def _redact_key(text: str) -> str:
+    """Скрывает Steam API ключ в строке перед записью в лог."""
+    return text.replace(_STEAM_KEY, "***")
+
+
 def _get_json(url: str) -> Optional[dict]:
     """
     Выполняет GET-запрос и возвращает разобранный JSON либо None при неудаче.
-
-    Делает ограниченное число повторов при любых сетевых ошибках.
 
     Args:
         url (str): Полный адрес запроса
@@ -91,16 +93,13 @@ def _get_json(url: str) -> Optional[dict]:
     Returns:
         Optional[dict]: Тело ответа как dict или None
     """
-    for attempt in range(1, REQUEST_RETRIES + 1):
-        try:
-            response = requests.get(url, timeout=REQUEST_TIMEOUT)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as exc:
-            logger.warning("Steam API | попытка %d/%d не удалась (%s): %s",
-                           attempt, REQUEST_RETRIES, url, exc)
-    logger.error("Steam API | запрос не удался после %d попыток: %s", REQUEST_RETRIES, url)
-    return None
+    try:
+        response = requests.get(url, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as exc:
+        logger.warning("Steam API | запрос не удался: %s", _redact_key(str(exc)))
+        return None
 
 
 def _fetch_sources() -> Optional[Tuple[List[dict], List[List[dict]]]]:
