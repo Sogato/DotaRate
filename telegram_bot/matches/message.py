@@ -2,8 +2,8 @@
 Сборка текста сообщения о матче для публикации в Telegram.
 
 Превращает карточку матча в готовую строку. Все функции чистые:
-получают данные матча и справочник имён героев, возвращают строку без
-сетевых вызовов, обращений к БД и побочных действий.
+получают данные матча, возвращают строку без сетевых вызовов, обращений
+к БД и побочных действий.
 
 Сообщение состоит из независимых секций: шапка, ход игры, составы, коэффициенты,
 прогноз, исход. Каждую секцию строит своя функция и возвращает блок без пустых
@@ -11,15 +11,11 @@
 
 Форматируются только активированные матчи (bet_status=True). У таких матчей
 backend уже заполнил коэффициенты, прогнозы и поля хода игры, поэтому функции не
-проверяют их на None. Имена героев приходят как hero_id и определяются через
-переданный HeroCache.
+проверяют их на None.
 """
 
 # Стандартные библиотеки
 from typing import List
-
-# Локальные импорты
-from dota_core.utils.hero_cache import HeroCache
 
 
 def _format_mmss(seconds: int) -> str:
@@ -117,18 +113,13 @@ def _format_progress(match: dict) -> str:
 def _format_roster(emoji: str,
                    side: str,
                    team_name: str,
-                   players: List[dict],
-                   hero_cache: HeroCache) -> str:
+                   players: List[dict]) -> str:
     """
     Состав одной стороны: заголовок и строки "герой (никнейм)".
-
-    Имя героя берётся по hero_id из HeroCache. Для неизвестного id кэш сам
-    возвращает заглушку, поэтому проверять id здесь не нужно.
     """
     lines = [f"{emoji} {side} ({team_name.strip()}):"]
     for player in players:
-        hero_name = hero_cache.get_hero_name(player['hero_id'])
-        lines.append(f" — {hero_name} ({player['nickname'].strip()})")
+        lines.append(f" — {player['hero_name']} ({player['nickname'].strip()})")
     return "\n".join(lines)
 
 
@@ -193,13 +184,12 @@ def _format_outcome(match: dict) -> str:
 # Сборка сообщения
 # ────────────────────────────────────────────────────────────────────────────
 
-def build(match: dict, hero_cache: HeroCache) -> str:
+def build(match: dict) -> str:
     """
     Собирает полный текст сообщения о матче.
 
     Args:
         match (dict): Карточка матча из MatchSerializer
-        hero_cache (HeroCache): Готовый справочник имён героев
 
     Returns:
         str: Текст сообщения для отправки или редактирования в Telegram
@@ -207,8 +197,8 @@ def build(match: dict, hero_cache: HeroCache) -> str:
     sections = [
         _format_header(match),
         _format_progress(match),
-        _format_roster("☀️", "Radiant", match['radiant_team_name'], match['radiant_players'], hero_cache),
-        _format_roster("🌑", "Dire", match['dire_team_name'], match['dire_players'], hero_cache),
+        _format_roster("☀️", "Radiant", match['radiant_team_name'], match['radiant_players']),
+        _format_roster("🌑", "Dire", match['dire_team_name'], match['dire_players']),
         _format_coefficients(match),
         _format_prediction(match),
         _format_outcome(match),

@@ -7,16 +7,12 @@
     2. Планировщик статистики — scheduler.start() в фоновом потоке-демоне:
        по расписанию публикует включённые отчёты и раз в день запускает
        очистку БД.
-
-Перед запуском настраивается логирование на весь процесс и в память
-загружается справочник имён героев (HeroCache) — без него бот не стартует.
 """
 
 # Стандартные библиотеки
 import logging
 
 # Локальные импорты
-from dota_core.utils.hero_cache import HeroCache
 from telegram_bot import scheduler
 from telegram_bot.matches import publisher
 
@@ -32,35 +28,16 @@ def _configure_logging() -> None:
     )
 
 
-def _load_hero_cache() -> HeroCache:
-    """
-    Загружает справочник имён героев в память.
-
-    Returns:
-        HeroCache: Готовый к работе справочник имён
-
-    Raises:
-        RuntimeError: Справочник героев пуст или недоступен
-    """
-    hero_cache = HeroCache()
-    if not hero_cache.initialize():
-        raise RuntimeError(
-            "HeroCache: справочник героев пуст или недоступен. Бот не запущен."
-        )
-    return hero_cache
-
-
 def main() -> None:
     """Готовит окружение и запускает оба цикла бота."""
     _configure_logging()
-    hero_cache = _load_hero_cache()
 
     # Планировщик — фоновый поток-демон: завершается вместе с процессом.
     scheduler.start()
 
     # Публикация матчей — в главном потоке, его и останавливаем по прерыванию.
     try:
-        publisher.run(hero_cache)
+        publisher.run()
     except KeyboardInterrupt:
         logger.info("Остановка по прерыванию")
 

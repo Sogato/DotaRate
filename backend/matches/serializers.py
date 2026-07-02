@@ -24,6 +24,7 @@ class PlayerSerializer(serializers.ModelSerializer):
             'nickname',
             'team_number',
             'hero_id',
+            'hero_name',
             'hero_variant',
         )
 

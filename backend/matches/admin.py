@@ -6,8 +6,6 @@
 доступны только для чтения, а управляющие поля (доступность ставок,
 коэффициенты, признак трансляции, событие Winline) оставлены редактируемыми
 для ручной корректировки.
-
-Имена героев в составе берутся из справочника HeroCache (shared_resources), загруженного при старте сервера.
 """
 
 # Сторонние библиотеки
@@ -16,17 +14,11 @@ from django.utils.html import format_html
 
 # Локальные импорты
 from .models import Match, Player, MatchPublication
-from . import shared_resources
 
 # Заголовки панели администрирования.
 admin.site.site_header = 'Dota Rate Администрирование'
 admin.site.site_title = 'Dota Rate'
 admin.site.index_title = 'Управление данными'
-
-
-def _hero_name(hero_id: int) -> str:
-    """Локализованное имя героя из справочника shared_resources."""
-    return shared_resources.get_hero_cache().get_hero_name(hero_id)
 
 
 class PlayerInline(admin.TabularInline):
@@ -36,15 +28,9 @@ class PlayerInline(admin.TabularInline):
     extra = 0
     can_delete = False
     ordering = ('team_number',)
-    fields = ('team_number', 'nickname', 'account_id', 'hero', 'hero_id')
-    readonly_fields = ('hero',)
+    fields = ('team_number', 'nickname', 'account_id', 'hero_name', 'hero_id')
     verbose_name = 'Игрок'
     verbose_name_plural = 'Состав команд'
-
-    @admin.display(description='Герой')
-    def hero(self, obj):
-        """Читаемое имя героя по его идентификатору."""
-        return _hero_name(obj.hero_id)
 
 
 class MatchPublicationInline(admin.StackedInline):
@@ -234,12 +220,13 @@ class MatchAdmin(admin.ModelAdmin):
 class PlayerAdmin(admin.ModelAdmin):
     """Отдельная таблица игроков (в основном просматривается внутри матча)."""
 
-    list_display = ('nickname', 'account_id', 'match', 'team_number', 'hero', 'hero_id')
+    list_display = ('nickname', 'account_id', 'match', 'team_number', 'hero_name', 'hero_id')
     list_filter = ('team_number',)
     search_fields = (
         'nickname',
         'account_id',
         'hero_id',
+        'hero_name',
         'match__match_id',
         'match__radiant_team_name',
         'match__dire_team_name',
@@ -247,8 +234,3 @@ class PlayerAdmin(admin.ModelAdmin):
     list_select_related = ('match',)
     raw_id_fields = ('match',)
     list_per_page = 50
-
-    @admin.display(description='Герой')
-    def hero(self, obj):
-        """Читаемое имя героя по его идентификатору."""
-        return _hero_name(obj.hero_id)

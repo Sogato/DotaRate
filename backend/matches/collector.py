@@ -22,7 +22,9 @@
     True     — коэффициенты получены, прогноз построен, матч активен; обновляем
                счёт и net worth по ходу игры.
 
-Статические данные и модели поднимаются на старте сервера.
+Статические данные и модели поднимаются на старте сервера. Справочные имена
+(название лиги, имена героев) определяются в момент записи и сохраняются в
+Match/Player как обычные поля.
 
 Публичные точки входа, вызываемые из views.py:
     - run()              — один проход опроса live-линии.
@@ -594,6 +596,9 @@ def _persist_player(match: Match, record: dict) -> None:
 
     Ключ поиска — (match, account_id), остальные поля идут в defaults и
     обновляются, чтобы смена героя в драфте не создавала дубликат.
+
+    Имя героя определяется по hero_id через справочник HeroCache и хранится
+    в записи игрока рядом с идентификатором.
     """
     Player.objects.update_or_create(
         match=match,
@@ -602,6 +607,7 @@ def _persist_player(match: Match, record: dict) -> None:
             "nickname": record["nickname"],
             "team_number": record["team_number"],
             "hero_id": record["hero_id"],
+            "hero_name": shared_resources.get_hero_cache().get_hero_name(record["hero_id"]),
             "hero_variant": record["hero_variant"],
         },
     )

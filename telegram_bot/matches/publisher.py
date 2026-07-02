@@ -25,7 +25,6 @@ from typing import Dict
 from telebot.apihelper import ApiException
 
 # Локальные импорты
-from dota_core.utils.hero_cache import HeroCache
 from .. import api_client
 from ..config import BOT, TELEGRAM_CHAT_ID, PUBLISH_WIN_THRESHOLD
 from . import message
@@ -39,24 +38,19 @@ POLL_INTERVAL = 5
 _last_text: Dict[int, str] = {}
 
 
-def run(hero_cache: HeroCache) -> None:
-    """
-    Запускает бесконечный цикл публикации матчей. Возврата нет — выход по прерыванию.
-
-    Args:
-        hero_cache (HeroCache): Готовый справочник имён героев для формирования сообщений
-    """
+def run() -> None:
+    """Запускает бесконечный цикл публикации матчей. Возврата нет — выход по прерыванию."""
     logger.info("Бот запущен, вход в цикл публикации матчей")
     while True:
         try:
-            _poll(hero_cache)
+            _poll()
         except Exception:
             # Цикл должен пережить любой неожиданный сбой прохода.
             logger.exception("Неожиданный сбой в проходе цикла")
         time.sleep(POLL_INTERVAL)
 
 
-def _poll(hero_cache: HeroCache) -> None:
+def _poll() -> None:
     """Один проход: запуск сбора, чтение матчей, обработка каждого."""
     # Если основной проход сбора не удался, читать матчи в этом проходе смысла нет.
     if api_client.trigger_live_collection() is None:
@@ -69,13 +63,13 @@ def _poll(hero_cache: HeroCache) -> None:
 
     for match in matches:
         try:
-            _route(match, hero_cache)
+            _route(match)
         except Exception:
             # Ошибка на одном матче не должна прерывать весь проход.
             logger.exception("Сбой обработки матча %s", match.get('match_id'))
 
 
-def _route(match: dict, hero_cache: HeroCache) -> None:
+def _route(match: dict) -> None:
     """Направляет матч в публикацию или редактирование по его состоянию."""
     # Обрабатываются только матчи с открытой ставкой.
     if match['bet_status'] is not True:
@@ -87,22 +81,22 @@ def _route(match: dict, hero_cache: HeroCache) -> None:
     # Ещё не опубликован и не завершён — кандидат на публикацию.
     if message_id is None and match['radiant_win'] is None:
         if _should_publish(match):
-            _publish(match, hero_cache)
+            _publish(match)
         return
 
     # Опубликован и помечен на обновление — редактируем при изменении.
     if publication.get('refresh_flag'):
-        _edit(match, hero_cache)
+        _edit(match)
 
 
-def _publish(match: dict, hero_cache: HeroCache) -> None:
+def _publish(match: dict) -> None:
     """
     Публикует новое сообщение о матче и сохраняет его id на backend.
 
     refresh_flag=True переводит матч в режим обновления: на следующих прохода он попадёт в ветку редактирования.
     """
     match_id = match['match_id']
-    text = message.build(match, hero_cache)
+    text = message.build(match)
 
     try:
         sent = BOT.send_message(TELEGRAM_CHAT_ID, text)
@@ -123,7 +117,7 @@ def _publish(match: dict, hero_cache: HeroCache) -> None:
         )
 
 
-def _edit(match: dict, hero_cache: HeroCache) -> None:
+def _edit(match: dict) -> None:
     """
     Редактирует сообщение при изменении текста.
 
@@ -140,7 +134,7 @@ def _edit(match: dict, hero_cache: HeroCache) -> None:
         logger.warning("Матч %s: стоит refresh_flag, но нет message_id", match_id)
         return
 
-    text = message.build(match, hero_cache)
+    text = message.build(match)
 
     if _last_text.get(match_id) != text:
         try:
