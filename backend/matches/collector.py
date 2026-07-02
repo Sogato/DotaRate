@@ -50,6 +50,7 @@ from dota_core.config import RADIANT_INDEX, DIRE_INDEX, TEAM_SIZE
 from . import shared_resources
 from .inference import match_predictor
 from .bookmakers import winline_parser
+from .bookmakers.winline_parser import WinlineUnavailableError
 from .models import Match, Player, MatchPublication
 
 logger = logging.getLogger(__name__)
@@ -213,7 +214,13 @@ def _process_new_match(game: dict) -> bool:
 
     radiant_name = game["radiant_team"]["team_name"]
     dire_name = game["dire_team"]["team_name"]
-    event_id = winline_parser.resolve_event_id(radiant_name, dire_name)
+    try:
+        event_id = winline_parser.resolve_event_id(radiant_name, dire_name)
+    except WinlineUnavailableError as exc:
+        # Линию не удалось проверить — матч не записываем вовсе, следующий проход увидит его как новый.
+        logger.warning("Матч %s: Winline недоступен, отложено до следующего прохода (%s)",
+                       game["match_id"], exc)
+        return False
 
     if event_id is None:
         # Матча нет в линии Winline — ставок не будет.
@@ -244,9 +251,15 @@ def _try_activate(match: Match, game: dict) -> None:
     коэффициенты ещё закрыты, матч остаётся в ожидании до следующего прохода.
     """
     map_number = match.radiant_series_wins + match.dire_series_wins + 1
-    coefs = winline_parser.get_coefficients(
-        match.winline_event_id, match.radiant_team_name, match.dire_team_name, map_number,
-    )
+    try:
+        coefs = winline_parser.get_coefficients(
+            match.winline_event_id, match.radiant_team_name, match.dire_team_name, map_number,
+        )
+    except WinlineUnavailableError as exc:
+        # Страницу события не удалось проверить; bet_status остаётся None, следующий проход повторит попытку.
+        logger.warning("Матч %s: Winline недоступен, активация отложена (%s)",
+                       match.match_id, exc)
+        return
     if coefs is None:
         return  # коэффициенты ещё не выставлены
 
