@@ -220,6 +220,23 @@ class MatchListExceptLeague(generics.ListAPIView):
         ).order_by('-match_id')
 
 
+class ActiveMatchList(generics.ListAPIView):
+    """
+    Активные матчи со ставкой.
+
+    Матч считается активным, пока его исход неизвестен, а также после
+    завершения — пока у его публикации стоит refresh_flag, то есть
+    опубликованная карточка ещё не приведена к итоговому состоянию.
+    """
+    serializer_class = MatchSerializer
+
+    def get_queryset(self):
+        active = Q(radiant_win__isnull=True) | Q(publication__refresh_flag=True)
+        return _match_queryset().filter(
+            active, bet_status=True,
+        ).order_by('-match_id')
+
+
 class MatchList(generics.ListAPIView):
     """Все матчи без фильтрации."""
     serializer_class = MatchSerializer

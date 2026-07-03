@@ -23,7 +23,7 @@ load() собирает состояние целиком либо бросае�
 # Сторонние библиотеки
 
 # Локальные импорты
-from inference.model_cache import ModelCache
+from .inference.model_cache import ModelCache
 from dota_core.config import EXCLUDED_HERO_IDS
 from dota_core.utils.hero_mapper import HeroMapper
 from dota_core.utils.hero_cache import HeroCache

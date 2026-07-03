@@ -2,8 +2,8 @@
 Основной цикл публикации матчей в Telegram-канале.
 
 Каждые несколько секунд бот запускает сбор данных на backend, забирает
-список матчей и для каждого решает: опубликовать новое сообщение,
-отредактировать существующее или пропустить (см. _route).
+список сопровождаемых матчей и для каждого решает: опубликовать новое
+сообщение, отредактировать существующее или пропустить (см. _route).
 
 Матч ведётся, пока у него стоит refresh_flag. Когда известен исход
 (radiant_win), бот вносит финальную правку и снимает флаг — дальше
@@ -57,7 +57,7 @@ def _poll() -> None:
         return
     api_client.trigger_completion_check()
 
-    matches = api_client.get_matches()
+    matches = api_client.get_active_matches()
     if matches is None:
         return
 
@@ -71,10 +71,6 @@ def _poll() -> None:
 
 def _route(match: dict) -> None:
     """Направляет матч в публикацию или редактирование по его состоянию."""
-    # Обрабатываются только матчи с открытой ставкой.
-    if match['bet_status'] is not True:
-        return
-
     publication = match.get('publication') or {}
     message_id = publication.get('telegram_message_id')
 

@@ -31,6 +31,9 @@ urlpatterns = [
     path('matches/day/<str:day>/', views.DailyMatchList.as_view(), name='matches-day'),
     path('matches/all-time/', views.AllTimeMatchList.as_view(), name='matches-all-time'),
 
+    # Чтение данных: активные матчи
+    path('matches/active/', views.ActiveMatchList.as_view(), name='matches-active'),
+
     # Чтение данных: списки по лиге
     path('matches/league/<int:league_id>/', views.MatchListByLeague.as_view(), name='matches-by-league'),
     path('matches/except-league/<int:league_id>/', views.MatchListExceptLeague.as_view(),

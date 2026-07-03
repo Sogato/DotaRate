@@ -21,4 +21,4 @@ class MatchesConfig(AppConfig):
 
         # Импорт отложен: на уровне модуля зависимости состояния ещё не готовы.
         from . import app_state
-        shared_resources.load()
+        app_state.load()

@@ -310,7 +310,7 @@ def _predict(radiant_players: List[dict], dire_players: List[dict]) -> Optional[
     """
     Считает прогнозы по составам через match_predictor.
 
-    Маппер и модели берутся из shared_resources.
+    Маппер и модели берутся из app_state.
 
     Returns:
         Optional[Dict[str, float]]: Прогнозы под поля Match, либо None, если
@@ -322,8 +322,8 @@ def _predict(radiant_players: List[dict], dire_players: List[dict]) -> Optional[
         return match_predictor.predict(
             radiant_ids,
             dire_ids,
-            shared_resources.get_hero_mapper(),
-            shared_resources.get_model_cache().get_models(),
+            app_state.get_hero_mapper(),
+            app_state.get_model_cache().get_models(),
         )
     except ValueError as exc:
         logger.warning("Прогноз пропущен: %s", exc)
@@ -525,7 +525,7 @@ def _persist_skeleton(game: dict,
     # create_defaults добавляем сверху лишь то, что фиксируется один раз.
     common = {
         "league_id": game["league_id"],
-        "league_name": shared_resources.get_league_cache().get_league_name(game["league_id"]),
+        "league_name": app_state.get_league_cache().get_league_name(game["league_id"]),
         "radiant_team_id": game["radiant_team"]["team_id"],
         "radiant_team_name": radiant_name,
         "dire_team_id": game["dire_team"]["team_id"],
@@ -607,7 +607,7 @@ def _persist_player(match: Match, record: dict) -> None:
             "nickname": record["nickname"],
             "team_number": record["team_number"],
             "hero_id": record["hero_id"],
-            "hero_name": shared_resources.get_hero_cache().get_hero_name(record["hero_id"]),
+            "hero_name": app_state.get_hero_cache().get_hero_name(record["hero_id"]),
             "hero_variant": record["hero_variant"],
         },
     )

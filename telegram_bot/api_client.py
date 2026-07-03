@@ -34,6 +34,7 @@ _COLLECT_LIVE       = 'collect/live/'
 _COLLECT_COMPLETE   = 'collect/complete/'
 
 _MATCHES            = 'matches/'
+_ACTIVE_MATCHES     = 'matches/active/'
 _MATCH_DETAIL       = 'matches/{match_id}/'
 
 _SET_TELEGRAM_ID    = 'publication/telegram-id/'
@@ -116,6 +117,16 @@ def trigger_completion_check() -> Optional[dict]:
 def get_matches() -> Optional[List[dict]]:
     """Возвращает список всех матчей, либо None при ошибке запроса."""
     return _get_json(_MATCHES)
+
+
+def get_active_matches() -> Optional[List[dict]]:
+    """
+    Возвращает активные матчи со ставкой, либо None при ошибке запроса.
+
+    Активные — незавершённые матчи, а также завершённые, у публикации
+    которых ещё стоит refresh_flag.
+    """
+    return _get_json(_ACTIVE_MATCHES)
 
 
 def get_match(match_id: int) -> Optional[dict]:
