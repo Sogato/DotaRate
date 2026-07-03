@@ -19,7 +19,7 @@ from datetime import date, timedelta
 from typing import List, Optional
 
 # Локальные импорты
-from dota_core.config import DOTA_VERSION
+from dota_core.config import DOTA_VERSION, CONFIDENCE_THRESHOLDS
 from .. import api_client, config
 
 logger = logging.getLogger(__name__)
@@ -35,9 +35,6 @@ _MONTHS_NOMINATIVE = (
     "январь", "февраль", "март", "апрель", "май", "июнь",
     "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
 )
-
-# Пороги уверенности для анализа точности прогнозов.
-DEFAULT_CONFIDENCE_THRESHOLDS = [0.5, 0.55, 0.6, 0.65, 0.7]
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -157,7 +154,7 @@ def build(matches: List[dict], title: str) -> dict:
                 ],
             }
     """
-    thresholds = DEFAULT_CONFIDENCE_THRESHOLDS
+    thresholds = CONFIDENCE_THRESHOLDS
     n = len(thresholds)
 
     total = [0] * n

@@ -47,7 +47,7 @@ from sklearn.metrics import roc_auc_score
 
 # Локальные импорты
 from ml_training.data_loader_v1 import DataLoaderV1
-from ml_module.config import DOTA_VERSION
+from ml_module.config import DOTA_VERSION, CONFIDENCE_THRESHOLDS
 from dota_core.utils.console import (
     Colors,
     print_info_line,
@@ -71,8 +71,6 @@ RUN_DIR_PATTERN = re.compile(r"run_(\d+)(?:_.*)?$")     # Папка прого�
 DEFAULT_LEAGUE_IDS: Set[int] = set()        # Фильтр по ID лиг для БД, например {5401, 4266} (пустое множество = все лиги)
 DEFAULT_MAX_MATCHES = 10_000                # Лимит матчей при тестировании на БД (None = все)
 DEFAULT_BATCH_SIZE = 256                    # Размер батча для предсказаний
-
-DEFAULT_CONFIDENCE_THRESHOLDS = [0.5, 0.55, 0.6, 0.65, 0.7] # Пороги уверенности для анализа точности предсказаний ансамбля.
 
 
 class ModelTesterWinV1:
@@ -120,7 +118,7 @@ class ModelTesterWinV1:
         self.league_ids = league_ids if league_ids is not None else set(DEFAULT_LEAGUE_IDS)
         self.confidence_thresholds = (
             confidence_thresholds if confidence_thresholds is not None
-            else DEFAULT_CONFIDENCE_THRESHOLDS.copy()
+            else list(CONFIDENCE_THRESHOLDS)
         )
 
     def test(self,
