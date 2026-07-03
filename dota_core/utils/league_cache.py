@@ -19,6 +19,7 @@
 Особенности:
 - Данные загружаются только при явном вызове initialize()
 - Повторные вызовы безопасны и не вызывают повторной загрузки
+- После initialize() соединение с БД полностью закрыто, объект — это просто данные в памяти
 - get_league_name() никогда не падает, возвращает строку-заглушку для любых невалидных или отсутствующих ID
 """
 
@@ -32,6 +33,7 @@ from sqlalchemy.orm import sessionmaker, Session
 # Локальные импорты
 from dota_core.data_bases.leagues.models import League
 from dota_core.config import LEAGUES_DATABASE_URL
+from dota_core.utils.memory import dict_memory_bytes, format_memory
 from dota_core.utils.console import (
     Colors,
     print_subsection_header,
@@ -74,6 +76,7 @@ class LeagueCache:
         """
         Загружает все лиги из справочной БД и строит in-memory словарь.
 
+        Соединение с БД открывается и закрывается внутри этого метода.
         При повторном вызове возвращает True без повторной загрузки.
 
         Returns:
@@ -85,7 +88,7 @@ class LeagueCache:
         if self._initialized:
             return True
 
-        # Подключение к справочной БД
+        # Подключение к справочной БД (живёт только внутри этого метода)
         engine = create_engine(LEAGUES_DATABASE_URL)
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
         session: Session = SessionLocal()
@@ -111,6 +114,7 @@ class LeagueCache:
             # Подтверждение успешной загрузки
             print_info_line("Загружено лиг", f"{len(self._cache)}", "📊", Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN)
             print_info_line("Структура данных", "{leagueid: name}", "💾", Colors.BRIGHT_WHITE, Colors.BRIGHT_BLUE)
+            print_info_line("Задействовано памяти", format_memory(self.memory_usage_bytes()), "🧠", Colors.BRIGHT_WHITE, Colors.BRIGHT_CYAN)
             print_info_line("Статус", "Кэш инициализирован успешно", "✅", Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN)
             print()
 
@@ -125,8 +129,9 @@ class LeagueCache:
             return False
 
         finally:
-            # Закрываем сессию в любом случае
+            # Полностью освобождаем соединение с БД в любом случае
             session.close()
+            engine.dispose()
 
     def get_league_name(self, league_id: int) -> str:
         """
@@ -144,6 +149,16 @@ class LeagueCache:
         """
 
         return self._cache.get(league_id, f"Unknown League (ID: {league_id})")
+
+    def memory_usage_bytes(self) -> int:
+        """
+        Возвращает память, занимаемую данными кэша.
+
+        Returns:
+            int: Размер словаря _cache вместе с содержимым в байтах
+        """
+
+        return dict_memory_bytes(self._cache)
 
     def __len__(self) -> int:
         """

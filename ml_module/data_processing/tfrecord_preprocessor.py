@@ -154,14 +154,10 @@ class TFRecordPreprocessor:
             print_status_message(f"Ошибка подключения к базе данных: {e}", "error", "❌")
             raise
 
-        # Инициализация маппера героев с выводом статистики
-        print_subsection_header("Инициализация маппера героев", "🗺️", Colors.BRIGHT_PURPLE)
+        # Инициализация маппера героев
         self.hero_mapper = HeroMapper(excluded_hero_ids=EXCLUDED_HERO_IDS)
-        mapper_info = self.hero_mapper.get_mapping_info()
-        print_info_line("Диапазон индексов", f"{mapper_info['index_range']}", "🔢")
-        print_info_line("Исключено героев", f"{mapper_info['excluded_heroes_count']}", "❌",
-                        value_color=Colors.BRIGHT_RED)
-        print_info_line("Итого героев", f"{mapper_info['total_heroes']:,}", "🧙‍♂️")
+        if not self.hero_mapper.initialize():
+            raise RuntimeError("HeroMapper: не удалось построить маппинг героев")
 
     def _get_total_matches_count(self) -> int:
         """
@@ -644,9 +640,6 @@ class TFRecordPreprocessor:
                         value_color=Colors.BRIGHT_CYAN)
         print_info_line("Скорость обработки", f"{valid_matches / overall_time:.0f} матчей/сек", "🚀",
                         value_color=Colors.BRIGHT_GREEN)
-
-        # Освобождение ресурсов
-        self.hero_mapper.cleanup()
 
     def validate_tfrecord_files(self):
         """

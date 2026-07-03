@@ -49,7 +49,7 @@ from django.utils import timezone
 from dota_core import config as core_config
 from dota_core.config import RADIANT_INDEX, DIRE_INDEX, TEAM_SIZE
 
-from . import shared_resources
+from . import app_state
 from .inference import match_predictor
 from .bookmakers import winline_parser
 from .bookmakers.winline_parser import WinlineUnavailableError
@@ -323,7 +323,7 @@ def _predict(radiant_players: List[dict], dire_players: List[dict]) -> Optional[
             radiant_ids,
             dire_ids,
             shared_resources.get_hero_mapper(),
-            shared_resources.get_models(),
+            shared_resources.get_model_cache().get_models(),
         )
     except ValueError as exc:
         logger.warning("Прогноз пропущен: %s", exc)

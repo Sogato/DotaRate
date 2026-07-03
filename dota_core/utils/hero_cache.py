@@ -19,6 +19,7 @@
 Особенности:
 - Данные загружаются только при явном вызове initialize()
 - Повторные вызовы безопасны и не вызывают повторной загрузки
+- После initialize() соединение с БД полностью закрыто, объект это просто данные в памяти
 - get_hero_name() никогда не падает, возвращает строку-заглушку для любых невалидных или отсутствующих ID
 """
 
@@ -32,6 +33,7 @@ from sqlalchemy.orm import sessionmaker, Session
 # Локальные импорты
 from dota_core.data_bases.heroes.models import Hero
 from dota_core.config import HEROES_DATABASE_URL
+from dota_core.utils.memory import dict_memory_bytes, format_memory
 from dota_core.utils.console import (
     Colors,
     print_subsection_header,
@@ -74,6 +76,7 @@ class HeroCache:
         """
         Загружает всех героев из справочной БД и строит in-memory словарь.
 
+        Соединение с БД открывается и закрывается внутри этого метода.
         При повторном вызове возвращает True без повторной загрузки.
 
         Returns:
@@ -85,7 +88,7 @@ class HeroCache:
         if self._initialized:
             return True
 
-        # Подключение к справочной БД
+        # Подключение к справочной БД (живёт только внутри этого метода)
         engine = create_engine(HEROES_DATABASE_URL)
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
         session: Session = SessionLocal()
@@ -111,6 +114,7 @@ class HeroCache:
             # Подтверждение успешной загрузки
             print_info_line("Загружено героев", f"{len(self._cache)}", "📊", Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN)
             print_info_line("Структура данных", "{hero_id: localized_name}", "💾", Colors.BRIGHT_WHITE, Colors.BRIGHT_BLUE)
+            print_info_line("Задействовано памяти", format_memory(self.memory_usage_bytes()), "🧠", Colors.BRIGHT_WHITE, Colors.BRIGHT_CYAN)
             print_info_line("Статус", "Кэш инициализирован успешно", "✅", Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN)
             print()
 
@@ -125,8 +129,9 @@ class HeroCache:
             return False
 
         finally:
-            # Закрываем сессию в любом случае
+            # Полностью освобождаем соединение с БД в любом случае
             session.close()
+            engine.dispose()
 
     def get_hero_name(self, hero_id: int) -> str:
         """
@@ -144,6 +149,16 @@ class HeroCache:
         """
 
         return self._cache.get(hero_id, f"Unknown Hero (ID: {hero_id})")
+
+    def memory_usage_bytes(self) -> int:
+        """
+        Возвращает память, занимаемую данными кэша.
+
+        Returns:
+            int: Размер словаря _cache вместе с содержимым в байтах
+        """
+
+        return dict_memory_bytes(self._cache)
 
     def __len__(self) -> int:
         """
