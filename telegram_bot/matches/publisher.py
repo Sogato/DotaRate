@@ -95,7 +95,7 @@ def _publish(match: dict) -> None:
     text = message.build(match)
 
     try:
-        sent = BOT.send_message(TELEGRAM_CHAT_ID, text)
+        sent = BOT.send_message(TELEGRAM_CHAT_ID, text, parse_mode="HTML")
     except ApiException as exc:
         logger.warning("Матч %s: не удалось отправить сообщение: %s", match_id, exc)
         return
@@ -134,7 +134,7 @@ def _edit(match: dict) -> None:
 
     if _last_text.get(match_id) != text:
         try:
-            BOT.edit_message_text(text, TELEGRAM_CHAT_ID, message_id)
+            BOT.edit_message_text(text, TELEGRAM_CHAT_ID, message_id, parse_mode="HTML")
             _last_text[match_id] = text
             logger.info("Матч %s: сообщение обновлено", match_id)
         except ApiException as exc:

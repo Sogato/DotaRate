@@ -5,6 +5,11 @@
 получают данные матча, возвращают строку без сетевых вызовов, обращений
 к БД и побочных действий.
 
+Текст размечен HTML, поэтому отправлять и редактировать его нужно
+с parse_mode="HTML". Всё, что приходит из данных матча текстом — названия
+команд и лиг, имена героев, ники, — экранируется через _esc, чтобы
+произвольный символ '<' в нике не ломал разметку.
+
 Сообщение состоит из независимых секций: шапка, ход игры, составы, коэффициенты,
 прогноз, исход. Каждую секцию строит своя функция и возвращает блок без пустых
 строк по краям. build склеивает блоки, разделяя пустой строкой.
@@ -15,7 +20,13 @@ backend уже заполнил коэффициенты, прогнозы и п
 """
 
 # Стандартные библиотеки
+import html
 from typing import List
+
+
+def _esc(text: str) -> str:
+    """Экранирует HTML в произвольном тексте (команды, лиги, герои, ники)."""
+    return html.escape(str(text).strip())
 
 
 def _format_mmss(seconds: int) -> str:
@@ -24,86 +35,75 @@ def _format_mmss(seconds: int) -> str:
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
+def _format_money(value: float) -> str:
+    """Разделяет тысячи пробелом: 130939 → '130 939'."""
+    return format(int(value), ',').replace(',', ' ')
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Шапка: команды, турнир, победитель, статус
 # ────────────────────────────────────────────────────────────────────────────
 
 def _format_header(match: dict) -> str:
     """Заголовок сообщения: команды и номер карты, турнир, победитель, статус."""
-    radiant_name = match['radiant_team_name'].strip()
-    dire_name = match['dire_team_name'].strip()
+    radiant_name = _esc(match['radiant_team_name'])
+    dire_name = _esc(match['dire_team_name'])
 
-    game_number = match['radiant_series_wins'] + match['dire_series_wins'] + 1
-    lines = [f"🧀 {radiant_name} vs {dire_name} [Игра №{game_number}] 🧀"]
+    map_number = match['radiant_series_wins'] + match['dire_series_wins'] + 1
+    lines = [f"🧀 <b>{radiant_name} vs {dire_name}</b> [Карта {map_number}] 🧀"]
 
     if match['league_name']:
-        lines.append(f"🏆 {match['league_name'].strip()} 🏆")
+        lines.append(f"🏆 {_esc(match['league_name'])}")
 
     # Победитель есть только у завершённого матча.
     if match['radiant_win'] is not None:
         winner = radiant_name if match['radiant_win'] else dire_name
-        lines.append(f"🎉 Победитель {winner} 🎉")
-
-    if match['live_status']:
-        lines.append("🟡 Статус: LIVE 🟡")
+        lines.append(f"🎉 Победитель <b>{winner}</b>")
+        lines.append("🏁 <b>Матч окончен</b> 🏁")
     else:
-        lines.append("🔴 Статус: Завершён 🔴")
+        # Задержка трансляции известна только у данных полного scoreboard
+        # (у top-live поле нулевое) и уточняет статус внутри эмодзи-рамки.
+        delay = (f" (задержка {_format_mmss(match['stream_delay_s'])})"
+                 if match['stream_delay_s'] else "")
+        lines.append(f"🔴 Статус: LIVE{delay} 🔴")
 
     return "\n".join(lines)
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Ход игры: время, счёт, ценность/перевес
+# Ход игры: время, счёт, нетворс/перевес
 # ────────────────────────────────────────────────────────────────────────────
 
 def _format_progress(match: dict) -> str:
     """
-    Блок хода игры. Содержимое зависит от состояния матча и источника данных:
+    Блок хода игры: время, счёт и третья строка по источнику данных.
 
-    - Матч завершён (radiant_win задан) — итоговые цифры.
-    - Матч идёт, оба net_worth ненулевые — данные scoreboard: известна ценность
-      обеих команд, дополнительно показывается задержка трансляции.
-    - Матч идёт, хотя бы одно net_worth нулевое — данные top-live: известен
-      только перевес Radiant, разнесённый по сторонам (положительный в
-      net_worth_radiant, отрицательный по модулю в net_worth_dire).
+    - Матч завершён (radiant_win задан) или идёт с полным scoreboard
+      (оба net_worth ненулевые) — нетворс обеих команд.
+    - Матч идёт на данных top-live (хотя бы одно net_worth нулевое) —
+      известен только перевес Radiant, разнесённый по сторонам
+      (положительный в net_worth_radiant, отрицательный по модулю в
+      net_worth_dire); показывается перевес лидирующей стороны.
 
     У scoreboard оба поля net_worth всегда ненулевые, поэтому нулевое значение
     однозначно отличает данные top-live от полного scoreboard.
     """
-    duration = _format_mmss(match['duration'])
-    score = f"{match['radiant_score']} vs {match['dire_score']}"
+    lines = [
+        f"⌛️ Время: <b>{_format_mmss(match['duration'])}</b>",
+        f"⚔️ Счёт: <b>{match['radiant_score']} vs {match['dire_score']}</b>",
+    ]
 
-    # Завершённый матч: итоги.
-    if match['radiant_win'] is not None:
-        return (
-            "[Итоги матча]\n"
-            f"⏳ Время: {duration} мин.\n"
-            f"⚔️ Счёт: {score}\n"
-            f"💰 Ценность: {match['net_worth_radiant']} vs {match['net_worth_dire']}"
-        )
-
-    # Полный scoreboard: известна ценность обеих команд.
-    if match['net_worth_radiant'] != 0 and match['net_worth_dire'] != 0:
-        delay = _format_mmss(match['stream_delay_s'])
-        return (
-            f"[Задержка: {delay} мин.]\n"
-            f"⏳ Время: {duration} мин.\n"
-            f"⚔️ Счёт: {score}\n"
-            f"💰 Ценность: {match['net_worth_radiant']} vs {match['net_worth_dire']}"
-        )
-
-    # Данные top-live: известен только перевес одной из сторон.
-    lead = match['net_worth_radiant'] - match['net_worth_dire']
-    if lead >= 0:
-        advantage = f"💰 Преимущество ☀️ Radiant: {lead}"
+    finished = match['radiant_win'] is not None
+    scoreboard = match['net_worth_radiant'] != 0 and match['net_worth_dire'] != 0
+    if finished or scoreboard:
+        lines.append(f"💰 Нетворс: <b>{_format_money(match['net_worth_radiant'])} / "
+                     f"{_format_money(match['net_worth_dire'])}</b>")
     else:
-        advantage = f"💰 Преимущество 🌑 Dire: {abs(lead)}"
-    return (
-        "[Данные из лобби]\n"
-        f"⏳ Время: {duration} мин.\n"
-        f"⚔️ Счёт: {score}\n"
-        f"{advantage}"
-    )
+        lead = match['net_worth_radiant'] - match['net_worth_dire']
+        side = "☀️ Radiant" if lead >= 0 else "🌑 Dire"
+        lines.append(f"💰 Перевес {side}: {_format_money(abs(lead))}")
+
+    return "\n".join(lines)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -116,10 +116,13 @@ def _format_roster(emoji: str,
                    players: List[dict]) -> str:
     """
     Состав одной стороны: заголовок и строки "герой (никнейм)".
+
+    Ник набран моноширинным (<code>): визуально отделяется от героя, а тап по нему в Telegram копирует ник.
     """
-    lines = [f"{emoji} {side} ({team_name.strip()}):"]
+    lines = [f"{emoji} {side} (<b>{_esc(team_name)}</b>):"]
     for player in players:
-        lines.append(f" — {player['hero_name']} ({player['nickname'].strip()})")
+        lines.append(f" — {_esc(player['hero_name'])} "
+                     f"(<code>{_esc(player['nickname'])}</code>)")
     return "\n".join(lines)
 
 
@@ -130,9 +133,9 @@ def _format_roster(emoji: str,
 def _format_coefficients(match: dict) -> str:
     """Букмекерские коэффициенты на обе команды."""
     return (
-        "📈 Коэффициенты:\n"
-        f" ● {match['radiant_team_name'].strip()}: {match['radiant_team_coefficient']}\n"
-        f" ● {match['dire_team_name'].strip()}: {match['dire_team_coefficient']}"
+        "🎲 Коэффициенты:\n"
+        f" ● {_esc(match['radiant_team_name'])}: <b>{match['radiant_team_coefficient']}</b>\n"
+        f" ● {_esc(match['dire_team_name'])}: <b>{match['dire_team_coefficient']}</b>"
     )
 
 
@@ -146,8 +149,8 @@ def _format_prediction(match: dict) -> str:
     radiant_score = int(match['predict_radiant_score'])
     dire_score = int(match['predict_dire_score'])
     return (
-        f"⏳ Предполагаемое время: {predict_time} мин.\n"
-        f"⚔️ Предполагаемый счёт: {radiant_score} vs {dire_score}"
+        f"⌛️ Ожидаемое время: <b>{predict_time}</b>\n"
+        f"⚔️ Ожидаемый счёт: <b>{radiant_score} vs {dire_score}</b>"
     )
 
 
@@ -160,22 +163,22 @@ def _format_outcome(match: dict) -> str:
     Вероятность победы фаворита, а для завершённого матча отметка о том, сбылся ли прогноз.
     """
     predict_win = match['predict_win']
-    radiant_name = match['radiant_team_name'].strip()
-    dire_name = match['dire_team_name'].strip()
+    radiant_name = _esc(match['radiant_team_name'])
+    dire_name = _esc(match['dire_team_name'])
 
     if predict_win >= 0.5:
         favourite, probability = radiant_name, predict_win * 100
     else:
         favourite, probability = dire_name, (1 - predict_win) * 100
-    lines = [f"💊 Вероятность победы {favourite}: {probability:.2f}% 💊"]
+    lines = [f"🔮 Вероятность победы <b>{favourite}</b>: <b>{probability:.0f}%</b>"]
 
     # Оценка появляется только когда исход известен.
     if match['radiant_win'] is not None:
         predicted_radiant = predict_win >= 0.5
         if predicted_radiant == match['radiant_win']:
-            lines.append("🍻 Предсказание верно! 🍻")
+            lines.append("🍻 Предсказание верно!")
         else:
-            lines.append("🙀 Предсказание не верно... 🙀")
+            lines.append("🫠 Предсказание не верно...")
 
     return "\n".join(lines)
 
@@ -192,7 +195,7 @@ def build(match: dict) -> str:
         match (dict): Карточка матча из MatchSerializer
 
     Returns:
-        str: Текст сообщения для отправки или редактирования в Telegram
+        str: HTML-текст сообщения для отправки или редактирования в Telegram
     """
     sections = [
         _format_header(match),
