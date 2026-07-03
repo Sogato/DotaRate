@@ -105,14 +105,19 @@ def except_league(league_id: int) -> Optional[dict]:
     """
     Статистика по всем лигам, кроме указанной.
 
-    Название исключённой лиги недоступно: в выборку входят матчи других лиг,
-    поэтому в заголовке используется её id.
+    Матчи исключённой лиги в выборку не входят, поэтому её название добывается
+    отдельным запросом её собственных матчей; если запрос не удался, матчей
+    нет или название не заполнено, в заголовке остаётся id лиги.
     """
     matches = api_client.get_except_league(league_id)
     if matches is None:
         logger.warning("Статистика без лиги %s: матчи не получены", league_id)
         return None
-    title = f"Статистика всех лиг, кроме лиги {league_id}"
+
+    league_matches = api_client.get_by_league(league_id)
+    league_name = league_matches[0].get('league_name') if league_matches else None
+    title = (f"Статистика всех лиг, кроме {league_name}" if league_name
+             else f"Статистика всех лиг, кроме лиги {league_id}")
     return build(matches, title)
 
 
