@@ -1,8 +1,9 @@
 """
 Публикация статистических отчётов в Telegram.
 
-Сами отчёты считает compute, картинки по ним рисует chart — здесь они
-связываются: результат превращается в PNG с подписью и уходит в канал.
+Сами отчёты считает compute, картинки по ним рисует chart, подписи
+строит message — здесь они связываются: результат превращается в PNG
+с подписью и уходит в канал.
 
 Точки входа — функции publish_* по каждому виду отчёта. Периодические
 (daily/weekly/monthly) вызываются планировщиком; параметрические
@@ -18,7 +19,7 @@ from telebot.apihelper import ApiException
 
 # Локальные импорты
 from .. import config
-from . import chart, compute
+from . import chart, compute, message
 
 logger = logging.getLogger(__name__)
 
@@ -75,10 +76,10 @@ def _publish(result: Optional[dict]) -> None:
     if result is None:
         return
 
-    caption = compute.format_caption(result)
+    caption = message.format_caption(result)
     try:
         image = chart.render(result)
-        config.BOT.send_photo(config.TELEGRAM_CHAT_ID, image, caption=caption)
+        config.BOT.send_photo(config.TELEGRAM_CHAT_ID, image, caption=caption, parse_mode="HTML")
     except (ApiException, OSError) as exc:
         logger.warning("Не удалось опубликовать отчёт «%s»: %s", result['title'], exc)
         return

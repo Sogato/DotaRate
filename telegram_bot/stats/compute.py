@@ -4,8 +4,7 @@
 По набору завершённых матчей для каждого порога уверенности
 (DEFAULT_CONFIDENCE_THRESHOLDS) считает долю верных прогнозов и моделирует две
 стратегии ставок: фиксированную (постоянная ставка) и банковскую (процент от
-текущего банка, с капитализацией). Результат возвращается словарём — рисует
-график и постит его в Telegram уже stats.publisher.
+текущего банка, с капитализацией). Результат возвращается словарём.
 
 Расчёт выполняет build; обёртки daily/weekly/monthly/all_time/league/
 except_league получают для него матчи через api_client, подписывают отчёт
@@ -211,40 +210,6 @@ def build(matches: List[dict], title: str, kind: str) -> dict:
         for i, threshold in enumerate(thresholds)
     ]
     return {"title": title, "kind": kind, "thresholds": threshold_stats}
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# Текстовая подпись
-# ────────────────────────────────────────────────────────────────────────────
-
-def format_caption(result: dict) -> str:
-    """
-    Собирает текстовую подпись отчёта.
-
-    Пороги без движения денег в подпись не попадают: нулевой итог
-    фиксированной стратегии и нетронутый банк означают, что ставок
-    на этом пороге не было — показывать нечего.
-    """
-    lines = [f"🎊 {result['title']} 🎊"]
-
-    fixed = [t for t in result['thresholds'] if t['fixed_profit'] != 0]
-    if fixed:
-        lines.append("")
-        lines.append(f"💵 Фиксированная ставка {_money(config.FIXED_BID)}₽ 💵")
-        lines.extend(f" — {t['label']}:  {_money(t['fixed_profit'])}₽" for t in fixed)
-
-    changed = [t for t in result['thresholds'] if round(t['bank']) != config.BANK_SIZE]
-    if changed:
-        lines.append("")
-        lines.append(f"💰 Банк {_money(config.BANK_SIZE)}₽ при ставке {config.FIX_PERCENT}% 💰")
-        lines.extend(f" — {t['label']}:  {_money(t['bank'])}₽" for t in changed)
-
-    return "\n".join(lines)
-
-
-def _money(value: float) -> str:
-    """Округляет до рубля и разделяет тысячи пробелом: 12345.6 → '12 346'."""
-    return format(round(value), ',').replace(',', ' ')
 
 
 def _format_patch(version: str) -> str:
