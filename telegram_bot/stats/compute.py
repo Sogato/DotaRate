@@ -8,8 +8,9 @@
 график и постит его в Telegram уже stats.publisher.
 
 Расчёт выполняет build; обёртки daily/weekly/monthly/all_time/league/
-except_league получают для него матчи через api_client и подписывают отчёт
-заголовком своего периода. Даты в заголовках выводятся из даты сервера;
+except_league получают для него матчи через api_client, подписывают отчёт
+заголовком своего периода и помечают его видом (kind) — по нему chart
+выбирает оформление. Даты в заголовках выводятся из даты сервера;
 когда именно запускать отчёты — забота расписания, не этого модуля.
 """
 
@@ -49,7 +50,7 @@ def daily() -> Optional[dict]:
         return None
     day = date.today() - timedelta(days=1)
     title = f"Статистика за {day.day} {_MONTHS_GENITIVE[day.month - 1]} {day.year} года"
-    return build(matches, title)
+    return build(matches, title, "daily")
 
 
 def weekly() -> Optional[dict]:
@@ -64,7 +65,7 @@ def weekly() -> Optional[dict]:
         f"Статистика с {start.day} {_MONTHS_GENITIVE[start.month - 1]} {start.year} года "
         f"по {end.day} {_MONTHS_GENITIVE[end.month - 1]} {end.year} года"
     )
-    return build(matches, title)
+    return build(matches, title, "weekly")
 
 
 def monthly() -> Optional[dict]:
@@ -77,7 +78,7 @@ def monthly() -> Optional[dict]:
     last_day_prev_month = date.today().replace(day=1) - timedelta(days=1)
     month_name = _MONTHS_NOMINATIVE[last_day_prev_month.month - 1].title()
     title = f"Статистика за {month_name} {last_day_prev_month.year} года"
-    return build(matches, title)
+    return build(matches, title, "monthly")
 
 
 def all_time() -> Optional[dict]:
@@ -86,8 +87,8 @@ def all_time() -> Optional[dict]:
     if matches is None:
         logger.warning("Статистика за всё время: матчи не получены")
         return None
-    title = f"Статистика патча {DOTA_VERSION}"
-    return build(matches, title)
+    title = f"Статистика патча {_format_patch(DOTA_VERSION)}"
+    return build(matches, title, "all_time")
 
 
 def league(league_id: int) -> Optional[dict]:
@@ -98,7 +99,7 @@ def league(league_id: int) -> Optional[dict]:
         return None
     league_name = matches[0]['league_name'] if matches else None
     title = f"Статистика {league_name}" if league_name else f"Статистика лиги {league_id}"
-    return build(matches, title)
+    return build(matches, title, "league")
 
 
 def except_league(league_id: int) -> Optional[dict]:
@@ -118,14 +119,14 @@ def except_league(league_id: int) -> Optional[dict]:
     league_name = league_matches[0].get('league_name') if league_matches else None
     title = (f"Статистика всех лиг, кроме {league_name}" if league_name
              else f"Статистика всех лиг, кроме лиги {league_id}")
-    return build(matches, title)
+    return build(matches, title, "except_league")
 
 
 # ────────────────────────────────────────────────────────────────────────────
 # Расчётное ядро
 # ────────────────────────────────────────────────────────────────────────────
 
-def build(matches: List[dict], title: str) -> dict:
+def build(matches: List[dict], title: str, kind: str) -> dict:
     """
     Считает точность прогнозов и симулирует ставки по всем порогам.
 
@@ -140,11 +141,14 @@ def build(matches: List[dict], title: str) -> dict:
     Args:
         matches (List[dict]): Карточки матчей из MatchSerializer
         title (str): Заголовок отчёта
+        kind (str): Вид отчёта (daily/weekly/monthly/all_time/league/except_league)
+         — по нему chart выбирает оформление
 
     Returns:
         dict: Результат отчёта:
             {
                 "title": str,                  # заголовок отчёта
+                "kind": str,                   # вид отчёта
                 "thresholds": [                # срез по каждому порогу
                     {
                         "threshold": float,        # порог долей, например 0.6
@@ -206,7 +210,7 @@ def build(matches: List[dict], title: str) -> dict:
         }
         for i, threshold in enumerate(thresholds)
     ]
-    return {"title": title, "thresholds": threshold_stats}
+    return {"title": title, "kind": kind, "thresholds": threshold_stats}
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -241,3 +245,16 @@ def format_caption(result: dict) -> str:
 def _money(value: float) -> str:
     """Округляет до рубля и разделяет тысячи пробелом: 12345.6 → '12 346'."""
     return format(round(value), ',').replace(',', ' ')
+
+
+def _format_patch(version: str) -> str:
+    """
+    Приводит версию патча к виду с точкой: "741d" → "7.41d".
+
+    В системе версия хранится слитно, а людям привычна запись через точку
+    после мажорной цифры. Версия, где точка уже есть, возвращается как есть —
+    формат хранения можно поменять, не трогая этот код.
+    """
+    if not version or "." in version:
+        return version
+    return f"{version[0]}.{version[1:]}"

@@ -65,11 +65,3 @@ FIX_PERCENT = 10     # Доля банка в одной ставке, %
 
 # Время запуска отчётов относительно часового пояса сервера (HH:MM).
 STATS_RUN_AT = "04:00"
-
-# Цвета графиков для каждого вида отчёта: пара [фон, акцент] в HEX.
-STATS_DAILY_COLORS = ["#142446", "#009ce6"]
-STATS_WEEKLY_COLORS = ["#142446", "#f2b603"]
-STATS_MONTHLY_COLORS = ["#142446", "#df3664"]
-STATS_ALL_TIME_COLORS = ["#df3664", "#6b2da0"]
-STATS_LEAGUE_COLORS = ["#142446", "#df3664"]
-STATS_EXCEPT_LEAGUE_COLORS = ["#df3664", "#6b2da0"]
