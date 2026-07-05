@@ -80,7 +80,7 @@ def render(result: dict) -> BytesIO:
     x = np.arange(len(thresholds))
     top = max(t["total"] for t in thresholds) or 1
 
-    fig = Figure(figsize=(10, 6), dpi=300)
+    fig = Figure(figsize=(10, 6), dpi=400)
     FigureCanvasAgg(fig)  # привязывает холст Agg к фигуре для вывода в PNG
     fig.patch.set_facecolor(_BG)
 
