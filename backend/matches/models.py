@@ -144,6 +144,7 @@ class Player(models.Model):
         account_id (int): Steam ID игрока
         nickname (str): Никнейм игрока
         hero_id (int): Идентификатор героя из справочника Dota 2
+        hero_name (str): Локализованное имя героя
         hero_variant (int): Вариант героя
     """
     TEAM_CHOICES = (
@@ -161,6 +162,7 @@ class Player(models.Model):
     # Игровые параметры
     team_number = models.PositiveSmallIntegerField(choices=TEAM_CHOICES, db_index=True, verbose_name='Сторона')
     hero_id = models.PositiveIntegerField(verbose_name='ID героя')
+    hero_name = models.CharField(max_length=255, verbose_name='Герой')
     hero_variant = models.PositiveSmallIntegerField(verbose_name='Вариант героя')
 
     class Meta:

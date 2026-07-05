@@ -34,7 +34,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, WebDriverException
 
 # === КОНСТАНТЫ URL ===
 LIST_URL = 'https://winline.ru/stavki/sport/kibersport/dota_2'   # Общая линия Dota 2 (список матчей)
@@ -46,6 +46,12 @@ PAGE_TIMEOUT = 30            # Таймаут ожидания загрузки 
 
 # === КОНСТАНТЫ БРАУЗЕРА ===
 HEADLESS = True              # Запускать Firefox в безоконном режиме
+
+
+class WinlineUnavailableError(Exception):
+    """
+    Линия Winline недоступна: браузер не поднялся или страница не загрузилась.
+    """
 
 
 def _similar(a: str, b: str) -> float:
@@ -122,6 +128,9 @@ def _make_browser() -> webdriver.Firefox:
 
     Returns:
         webdriver.Firefox: Новый экземпляр браузера
+
+    Raises:
+        WinlineUnavailableError: Браузер не удалось запустить
     """
 
     options = FirefoxOptions()
@@ -146,7 +155,10 @@ def _make_browser() -> webdriver.Firefox:
     # Глушим телеметрию, чтобы не плодить фоновые запросы
     options.set_preference("toolkit.telemetry.enabled", False)
 
-    return webdriver.Firefox(options=options)
+    try:
+        return webdriver.Firefox(options=options)
+    except WebDriverException as exc:
+        raise WinlineUnavailableError(f"Firefox не запустился: {exc}") from exc
 
 
 def _load(browser: webdriver.Firefox, url: str, wait_css: str) -> Optional[BeautifulSoup]:
@@ -194,12 +206,17 @@ def resolve_event_id(team1: str,
     Returns:
         Optional[str]: Идентификатор найденного события либо None, если
             матч в линии отсутствует
+
+    Raises:
+        WinlineUnavailableError: Линию не удалось проверить (браузер не поднялся или страница не загрузилась).
     """
 
     with _make_browser() as browser:
         soup = _load(browser, LIST_URL, ".block-sport__champ-list")
         if soup is None:
-            return None
+            raise WinlineUnavailableError(
+                f"Линия Dota 2 не загрузилась за {PAGE_TIMEOUT} с: {LIST_URL}"
+            )
 
         t1, t2 = _norm(team1), _norm(team2)
         for card in soup.select('div.block-sport__champ-list .card'):
@@ -251,13 +268,19 @@ def get_coefficients(event_id: str,
         Optional[Tuple[float, float]]: Пара коэффициентов команд team1 и team2
             в порядке аргументов либо None, если ставки ещё не выставлены или
             исходы не сопоставились с командами
+
+    Raises:
+        WinlineUnavailableError: Страницу события не удалось проверить
+        (браузер не поднялся или страница не загрузилась).
     """
 
     with _make_browser() as browser:
         url = EVENT_URL.format(event_id=event_id)
         soup = _load(browser, url, "[class*='market']")
         if soup is None:
-            return None
+            raise WinlineUnavailableError(
+                f"Страница события {event_id} не загрузилась за {PAGE_TIMEOUT} с: {url}"
+            )
 
         bet_type = _find_bet_type(soup, f"{map_number} карта победитель")
         if bet_type is None:

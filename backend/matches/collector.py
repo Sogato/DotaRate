@@ -20,9 +20,11 @@
     None     — событие найдено (winline_event_id записан), но коэффициенты ещё
                закрыты, каждый проход пробуем их получить.
     True     — коэффициенты получены, прогноз построен, матч активен; обновляем
-               счёт и new worth по ходу игры.
+               счёт и net worth по ходу игры.
 
-Статические данные и модели поднимаются на старте сервера.
+Статические данные и модели поднимаются на старте сервера. Справочные имена
+(название лиги, имена героев) определяются в момент записи и сохраняются в
+Match/Player как обычные поля.
 
 Публичные точки входа, вызываемые из views.py:
     - run()              — один проход опроса live-линии.
@@ -47,9 +49,10 @@ from django.utils import timezone
 from dota_core import config as core_config
 from dota_core.config import RADIANT_INDEX, DIRE_INDEX, TEAM_SIZE
 
-from . import shared_resources
+from . import app_state
 from .inference import match_predictor
 from .bookmakers import winline_parser
+from .bookmakers.winline_parser import WinlineUnavailableError
 from .models import Match, Player, MatchPublication
 
 logger = logging.getLogger(__name__)
@@ -66,7 +69,6 @@ MATCH_HISTORY_BY_SEQ_URL = f"https://api.steampowered.com/IDOTA2Match_570/GetMat
 
 # Сетевые параметры запросов к Steam.
 REQUEST_TIMEOUT = 30   # секунд на ответ
-REQUEST_RETRIES = 3    # повторов при сетевой ошибке
 
 # Ключи, без которых live-матч не имеет смысла обрабатывать.
 REQUIRED_KEYS = frozenset((
@@ -78,11 +80,14 @@ REQUIRED_KEYS = frozenset((
 # Стадия 1. Steam-клиент: получение сырых данных
 # ────────────────────────────────────────────────────────────────────────────
 
+def _redact_key(text: str) -> str:
+    """Скрывает Steam API ключ в строке перед записью в лог."""
+    return text.replace(_STEAM_KEY, "***")
+
+
 def _get_json(url: str) -> Optional[dict]:
     """
     Выполняет GET-запрос и возвращает разобранный JSON либо None при неудаче.
-
-    Делает ограниченное число повторов при любых сетевых ошибках.
 
     Args:
         url (str): Полный адрес запроса
@@ -90,16 +95,13 @@ def _get_json(url: str) -> Optional[dict]:
     Returns:
         Optional[dict]: Тело ответа как dict или None
     """
-    for attempt in range(1, REQUEST_RETRIES + 1):
-        try:
-            response = requests.get(url, timeout=REQUEST_TIMEOUT)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as exc:
-            logger.warning("Steam API | попытка %d/%d не удалась (%s): %s",
-                           attempt, REQUEST_RETRIES, url, exc)
-    logger.error("Steam API | запрос не удался после %d попыток: %s", REQUEST_RETRIES, url)
-    return None
+    try:
+        response = requests.get(url, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as exc:
+        logger.warning("Steam API | запрос не удался: %s", _redact_key(str(exc)))
+        return None
 
 
 def _fetch_sources() -> Optional[Tuple[List[dict], List[List[dict]]]]:
@@ -213,7 +215,13 @@ def _process_new_match(game: dict) -> bool:
 
     radiant_name = game["radiant_team"]["team_name"]
     dire_name = game["dire_team"]["team_name"]
-    event_id = winline_parser.resolve_event_id(radiant_name, dire_name)
+    try:
+        event_id = winline_parser.resolve_event_id(radiant_name, dire_name)
+    except WinlineUnavailableError as exc:
+        # Линию не удалось проверить — матч не записываем вовсе, следующий проход увидит его как новый.
+        logger.warning("Матч %s: Winline недоступен, отложено до следующего прохода (%s)",
+                       game["match_id"], exc)
+        return False
 
     if event_id is None:
         # Матча нет в линии Winline — ставок не будет.
@@ -244,9 +252,15 @@ def _try_activate(match: Match, game: dict) -> None:
     коэффициенты ещё закрыты, матч остаётся в ожидании до следующего прохода.
     """
     map_number = match.radiant_series_wins + match.dire_series_wins + 1
-    coefs = winline_parser.get_coefficients(
-        match.winline_event_id, match.radiant_team_name, match.dire_team_name, map_number,
-    )
+    try:
+        coefs = winline_parser.get_coefficients(
+            match.winline_event_id, match.radiant_team_name, match.dire_team_name, map_number,
+        )
+    except WinlineUnavailableError as exc:
+        # Страницу события не удалось проверить; bet_status остаётся None, следующий проход повторит попытку.
+        logger.warning("Матч %s: Winline недоступен, активация отложена (%s)",
+                       match.match_id, exc)
+        return
     if coefs is None:
         return  # коэффициенты ещё не выставлены
 
@@ -296,7 +310,7 @@ def _predict(radiant_players: List[dict], dire_players: List[dict]) -> Optional[
     """
     Считает прогнозы по составам через match_predictor.
 
-    Маппер и модели берутся из shared_resources.
+    Маппер и модели берутся из app_state.
 
     Returns:
         Optional[Dict[str, float]]: Прогнозы под поля Match, либо None, если
@@ -308,8 +322,8 @@ def _predict(radiant_players: List[dict], dire_players: List[dict]) -> Optional[
         return match_predictor.predict(
             radiant_ids,
             dire_ids,
-            shared_resources.get_hero_mapper(),
-            shared_resources.get_models(),
+            app_state.get_hero_mapper(),
+            app_state.get_model_cache().get_models(),
         )
     except ValueError as exc:
         logger.warning("Прогноз пропущен: %s", exc)
@@ -336,8 +350,12 @@ def _update_from_secondary(match_id: int, secondary: List[List[dict]]) -> bool:
     """
     Обновляет ход игры по вторичным источникам (top-live), если матч там есть.
 
-    Top-live отдаёт перевес Radiant (radiant_lead), а не суммарную ценность
-    команд, поэтому net_worth_dire здесь всегда 0.
+    Top-live отдаёт не суммарную ценность команд, а перевес Radiant
+    (radiant_lead), который может быть отрицательным при лидерстве Dire. Поскольку
+    оба поля net_worth неотрицательны, перевес зеркалится по сторонам: при лидерстве
+    Radiant он кладётся в net_worth_radiant (net_worth_dire=0), при лидерстве Dire —
+    наоборот. Знак, таким образом, кодируется тем, какое из полей ненулевое, а
+    их разность net_worth_radiant - net_worth_dire равна исходному radiant_lead.
 
     Returns:
         bool: True, если матч найден во вторичном источнике и обновлён
@@ -347,13 +365,14 @@ def _update_from_secondary(match_id: int, secondary: List[List[dict]]) -> bool:
             if int(entry.get("match_id", 0)) != match_id:
                 continue
             try:
+                lead = entry["radiant_lead"]
                 _write_progress(
                     match_id,
                     duration=entry["game_time"],
                     radiant_score=entry["radiant_score"],
                     dire_score=entry["dire_score"],
-                    net_worth_radiant=entry["radiant_lead"],
-                    net_worth_dire=0,
+                    net_worth_radiant=max(lead, 0),
+                    net_worth_dire=max(-lead, 0),
                 )
             except KeyError as exc:
                 logger.warning("Матч %s: неполные данные top-live, поле %s", match_id, exc)
@@ -506,7 +525,7 @@ def _persist_skeleton(game: dict,
     # create_defaults добавляем сверху лишь то, что фиксируется один раз.
     common = {
         "league_id": game["league_id"],
-        "league_name": shared_resources.get_league_cache().get_league_name(game["league_id"]),
+        "league_name": app_state.get_league_cache().get_league_name(game["league_id"]),
         "radiant_team_id": game["radiant_team"]["team_id"],
         "radiant_team_name": radiant_name,
         "dire_team_id": game["dire_team"]["team_id"],
@@ -577,6 +596,9 @@ def _persist_player(match: Match, record: dict) -> None:
 
     Ключ поиска — (match, account_id), остальные поля идут в defaults и
     обновляются, чтобы смена героя в драфте не создавала дубликат.
+
+    Имя героя определяется по hero_id через справочник HeroCache и хранится
+    в записи игрока рядом с идентификатором.
     """
     Player.objects.update_or_create(
         match=match,
@@ -585,6 +607,7 @@ def _persist_player(match: Match, record: dict) -> None:
             "nickname": record["nickname"],
             "team_number": record["team_number"],
             "hero_id": record["hero_id"],
+            "hero_name": app_state.get_hero_cache().get_hero_name(record["hero_id"]),
             "hero_variant": record["hero_variant"],
         },
     )

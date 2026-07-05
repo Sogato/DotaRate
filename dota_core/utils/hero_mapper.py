@@ -7,16 +7,18 @@
 
 Основные возможности:
 - Двусторонний маппинг: hero_id ↔ плотный индекс
-- Опциональное исключение нежелательных героев
-- Ленивая инициализация (маппинги строятся при первом обращении)
-- Кеширование результатов для повторных обращений
+- Опциональное исключение нежелательных героев через excluded_hero_ids
 
-Управление ресурсами:
-    Объект удерживает SQLAlchemy engine (пул соединений к Heroes БД) на всё
-    время своей жизни. Engine создаётся в __init__ и используется один раз —
-    при первом построении маппинга для чтения hero_id из БД. После завершения
-    работы с маппером необходимо вызвать cleanup(), иначе пул соединений
-    останется открытым до сборки мусора.
+Основные этапы работы:
+1. Создание экземпляра HeroMapper (данные не загружаются)
+2. Вызов initialize() — подключение к БД, чтение всех hero_id, построение словарей hero_to_index и index_to_hero
+3. Обращение к hero_to_index / index_to_hero — O(1) поиск в словарях
+
+Особенности:
+- Данные загружаются только при явном вызове initialize()
+- Повторные вызовы initialize() безопасны и не вызывают повторной загрузки
+- Соединение с БД открывается и закрывается внутри initialize()
+- Обращение к маппингам до успешной инициализации вызывает RuntimeError
 """
 
 # Стандартные библиотеки
@@ -24,11 +26,17 @@ from typing import Dict, Set, Any
 
 # Сторонние библиотеки
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, Session
 
 # Локальные импорты
 from dota_core.data_bases.heroes.models import Hero
 from dota_core.config import HEROES_DATABASE_URL
+from dota_core.utils.memory import dict_memory_bytes, format_memory
+from dota_core.utils.console import (
+    Colors,
+    print_subsection_header,
+    print_info_line,
+)
 
 
 class HeroMapper:
@@ -38,86 +46,136 @@ class HeroMapper:
     Создает двусторонний маппинг между разреженными hero_id из базы данных
     и плотными индексами для embedding слоев. Поддерживает исключение героев.
 
-    Маппинг строится лениво при первом обращении к свойствам и кешируется.
-
-    Управление ресурсами:
-        Экземпляр удерживает подключение к БД (engine/пул соединений), которое
-        создаётся и живёт всё время жизни объекта. По окончании работы вызывающий код
-        ОБЯЗАН вызвать cleanup() для освобождения пула.
+    Данные загружаются из БД один раз при вызове initialize() и сохраняются
+    в in-memory словарях на всё время работы. Соединение с БД открывается
+    и закрывается внутри initialize(). Повторные вызовы initialize()
+    безопасны — повторная загрузка не выполняется.
 
     Attributes:
         excluded_hero_ids (Set[int]): Множество исключенных hero_id
-        engine: SQLAlchemy движок для подключения к БД
-        session_maker: Фабрика сессий SQLAlchemy
+        _hero_to_index (Dict[int, int]): Словарь {hero_id: плотный_индекс}
+        _index_to_hero (Dict[int, int]): Словарь {плотный_индекс: hero_id}
+        _initialized (bool): Флаг успешной инициализации
+
+    Example:
+        mapper = HeroMapper(excluded_hero_ids={130})
+        mapper.initialize()
+        print(mapper.hero_to_index[1])  # 0
+        print(mapper.total_heroes)      # 124
     """
 
-    def __init__(self, excluded_hero_ids: Set[int] | None = None):
+    def __init__(self, excluded_hero_ids: Set[int] | None = None) -> None:
         """
-        Инициализирует маппер с настройкой подключения к БД и опциональным исключением героев.
+        Создаёт пустой экземпляр маппера.
+
+        К БД не подключается, данные не загружает — только сохраняет конфигурацию.
+        Для загрузки данных вызовите initialize().
 
         Args:
-            excluded_hero_ids (Set[int], optional): Множество hero_id для исключения
-            из маппинга (например, новые или проблемные герои)
+            excluded_hero_ids (Set[int], optional): Множество hero_id для исключения из маппинга
         """
-        self.excluded_hero_ids = excluded_hero_ids or set()
-        self.engine = create_engine(HEROES_DATABASE_URL)
-        self.session_maker = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
 
-        # Кеш для маппингов (заполняется лениво)
-        self._hero_to_index = None
-        self._index_to_hero = None
-        self._is_built = False
+        # Конфигурация: какие hero_id не включать в маппинг
+        self.excluded_hero_ids: Set[int] = excluded_hero_ids or set()
 
-    def _load_hero_ids_from_db(self):
+        # Словари маппинга, заполняются при initialize()
+        self._hero_to_index: Dict[int, int] = {}
+        self._index_to_hero: Dict[int, int] = {}
+
+        # Флаг успешной инициализации, защищает от повторной загрузки
+        self._initialized: bool = False
+
+    def initialize(self) -> bool:
         """
-        Загружает все hero_id из базы данных Heroes.
+        Загружает hero_id из справочной БД и строит оба словаря маппинга.
+
+        Соединение с БД открывается и закрывается внутри этого метода.
+        При повторном вызове возвращает True без повторной загрузки.
 
         Returns:
-            List[int]: Список всех hero_id из БД, отсортированный по возрастанию
+            bool: True если маппинг построен и готов к работе,
+                  False если БД пуста или произошла ошибка
         """
-        with self.session_maker() as session:
-            hero_ids = session.query(Hero.id).order_by(Hero.id).all()
-            return [hero_id[0] for hero_id in hero_ids]
 
-    def _build_mappings(self):
+        # Защита от повторной инициализации
+        if self._initialized:
+            return True
+
+        # Подключение к справочной БД (живёт только внутри этого метода)
+        engine = create_engine(HEROES_DATABASE_URL)
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        session: Session = SessionLocal()
+
+        try:
+            print_subsection_header("Инициализация маппера героев", "🗺️", Colors.BRIGHT_PURPLE)
+
+            # Загружаем все hero_id из справочной таблицы, по возрастанию
+            rows = session.query(Hero.id).order_by(Hero.id).all()
+            all_hero_ids = [row[0] for row in rows]
+
+            # Проверка на пустую БД
+            if not all_hero_ids:
+                print_info_line("Записей в БД", "0", "📊", Colors.BRIGHT_WHITE, Colors.BRIGHT_RED)
+                print_info_line("Статус", "База данных героев пуста", "⚠️", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
+                print_info_line("Результат", "Инициализация не выполнена", "❌", Colors.BRIGHT_WHITE, Colors.BRIGHT_RED)
+                print()
+                return False
+
+            # Исключение нежелательных героев
+            filtered_hero_ids = [
+                hero_id for hero_id in all_hero_ids
+                if hero_id not in self.excluded_hero_ids
+            ]
+
+            # Создание прямого маппинга {hero_id: плотный_индекс}
+            self._hero_to_index = {
+                hero_id: index
+                for index, hero_id in enumerate(filtered_hero_ids)
+            }
+
+            # Создание обратного маппинга {плотный_индекс: hero_id}
+            self._index_to_hero = {
+                index: hero_id
+                for hero_id, index in self._hero_to_index.items()
+            }
+
+            # Подтверждение успешной загрузки
+            print_info_line("Загружено героев", f"{len(self._hero_to_index)}", "🧙‍♂️", Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN)
+            print_info_line("Исключено героев", f"{len(self.excluded_hero_ids)}", "🚫", Colors.BRIGHT_WHITE, Colors.BRIGHT_YELLOW)
+            print_info_line("Структура данных", "{hero_id: index} + {index: hero_id}", "💾", Colors.BRIGHT_WHITE, Colors.BRIGHT_BLUE)
+            print_info_line("Задействовано памяти", format_memory(self.memory_usage_bytes()), "🧠", Colors.BRIGHT_WHITE, Colors.BRIGHT_CYAN)
+            print_info_line("Статус", "Маппер инициализирован успешно", "✅", Colors.BRIGHT_WHITE, Colors.BRIGHT_GREEN)
+            print()
+
+            self._initialized = True
+            return True
+
+        except Exception as e:
+            # Логируем ошибку и возвращаем False без пробрасывания исключения
+            print_info_line("Ошибка", str(e), "❌", Colors.BRIGHT_WHITE, Colors.BRIGHT_RED)
+            print_info_line("Статус", "Инициализация не выполнена", "❌", Colors.BRIGHT_WHITE, Colors.BRIGHT_RED)
+            print()
+            return False
+
+        finally:
+            # Полностью освобождаем соединение с БД в любом случае
+            session.close()
+            engine.dispose()
+
+    def _ensure_initialized(self) -> None:
         """
-        Строит двусторонний маппинг между hero_id и плотными индексами.
+        Проверяет, что маппинг построен, и даёт понятную ошибку вместо
+        пустого словаря.
 
-        Выполняется только один раз при первом обращении к свойствам.
-        Результат кешируется для последующих обращений.
-
-        Этапы:
-        1. Загрузка всех hero_id из БД
-        2. Фильтрация исключенных героев
-        3. Создание маппинга hero_to_index
-        4. Создание обратного маппинга index_to_hero
-        5. Установка флага _is_built
+        Raises:
+            RuntimeError: Если initialize() ещё не вызывался или завершился
+                неудачно
         """
-        if self._is_built:
-            return
 
-        # Загрузка hero_id из БД
-        all_hero_ids = self._load_hero_ids_from_db()
-
-        # Исключение нежелательных героев
-        filtered_hero_ids = [
-            hero_id for hero_id in all_hero_ids
-            if hero_id not in self.excluded_hero_ids
-        ]
-
-        # Создание прямого маппинга
-        self._hero_to_index = {
-            hero_id: index
-            for index, hero_id in enumerate(filtered_hero_ids)
-        }
-
-        # Создание обратного маппинга
-        self._index_to_hero = {
-            index: hero_id
-            for hero_id, index in self._hero_to_index.items()
-        }
-
-        self._is_built = True
+        if not self._initialized:
+            raise RuntimeError(
+                "HeroMapper не инициализирован. Вызовите initialize() перед использованием."
+            )
 
     @property
     def hero_to_index(self) -> Dict[int, int]:
@@ -126,8 +184,12 @@ class HeroMapper:
 
         Returns:
             Dict[int, int]: {hero_id: плотный_индекс}
+
+        Raises:
+            RuntimeError: Если маппер не инициализирован
         """
-        self._build_mappings()
+
+        self._ensure_initialized()
         return self._hero_to_index
 
     @property
@@ -137,8 +199,12 @@ class HeroMapper:
 
         Returns:
             Dict[int, int]: {плотный_индекс: hero_id}
+
+        Raises:
+            RuntimeError: Если маппер не инициализирован
         """
-        self._build_mappings()
+
+        self._ensure_initialized()
         return self._index_to_hero
 
     @property
@@ -148,8 +214,12 @@ class HeroMapper:
 
         Returns:
             int: Размерность пространства героев для embedding слоев
+
+        Raises:
+            RuntimeError: Если маппер не инициализирован
         """
-        self._build_mappings()
+
+        self._ensure_initialized()
         return len(self._hero_to_index)
 
     def get_mapping_info(self) -> Dict[str, Any]:
@@ -164,29 +234,53 @@ class HeroMapper:
                 - min_hero_id: минимальный hero_id в маппинге
                 - max_hero_id: максимальный hero_id в маппинге
                 - index_range: диапазон индексов
+                - memory_usage: занимаемая память в читаемом виде
+
+        Raises:
+            RuntimeError: Если маппер не инициализирован
         """
-        self._build_mappings()
+
+        self._ensure_initialized()
 
         hero_ids = list(self._hero_to_index.keys())
 
         return {
-            'total_heroes': self.total_heroes,
+            'total_heroes': len(self._hero_to_index),
             'excluded_heroes_count': len(self.excluded_hero_ids),
             'excluded_hero_ids': sorted(self.excluded_hero_ids),
             'min_hero_id': min(hero_ids) if hero_ids else None,
             'max_hero_id': max(hero_ids) if hero_ids else None,
-            'index_range': f"0-{self.total_heroes - 1}" if self.total_heroes > 0 else "empty"
+            'index_range': f"0-{len(self._hero_to_index) - 1}" if self._hero_to_index else "empty",
+            'memory_usage': format_memory(self.memory_usage_bytes()),
         }
 
-    def cleanup(self):
+    def memory_usage_bytes(self) -> int:
         """
-        Освобождает ресурсы подключения к базе данных (engine/пул соединений).
+        Возвращает память, занимаемую данными маппера (оба словаря).
 
-        Кешированные маппинги (hero_to_index / index_to_hero) при этом
-        сохраняются и остаются доступными — освобождается только подключение.
-
-        Безопасен к повторному вызову: при отсутствии engine ничего не делает,
-        а SQLAlchemy engine.dispose() сам по себе идемпотентен.
+        Returns:
+            int: Суммарный размер словарей маппинга в байтах
         """
-        if hasattr(self, 'engine'):
-            self.engine.dispose()
+
+        return dict_memory_bytes(self._hero_to_index, self._index_to_hero)
+
+    def __len__(self) -> int:
+        """
+        Возвращает количество героев в маппинге.
+
+        Returns:
+            int: Количество записей в словаре hero_to_index
+        """
+
+        return len(self._hero_to_index)
+
+    @property
+    def is_initialized(self) -> bool:
+        """
+        Проверяет статус инициализации маппера.
+
+        Returns:
+            bool: True если initialize() завершился успешно, False иначе
+        """
+
+        return self._initialized

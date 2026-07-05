@@ -40,7 +40,7 @@ def predict(radiant_hero_ids: Sequence[int],
     Args:
         radiant_hero_ids (Sequence[int]): hero_id команды Radiant (TEAM_SIZE штук)
         dire_hero_ids (Sequence[int]): hero_id команды Dire (TEAM_SIZE штук)
-        mapper (HeroMapper): Готовый маппер из state
+        mapper (HeroMapper): Готовый маппер из app_state
         models (Dict[str, List[Model]]): Ансамбли моделей по типам прогноза
 
     Returns:
@@ -76,7 +76,7 @@ def _team_to_indices(hero_ids: Sequence[int], mapper: HeroMapper) -> List[int]:
 
     Args:
         hero_ids (Sequence[int]): hero_id команды
-        mapper (HeroMapper): Готовый маппер из state
+        mapper (HeroMapper): Готовый маппер из app_state
 
     Returns:
         List[int]: Плотные индексы героев

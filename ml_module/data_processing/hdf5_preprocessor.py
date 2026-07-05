@@ -169,14 +169,10 @@ class HDF5Preprocessor:
             print_status_message(f"Ошибка подключения к базе данных: {e}", "error", "❌")
             raise
 
-        # Инициализация маппера героев с выводом детальной статистики
-        print_subsection_header("Инициализация маппера героев", "🗺️", Colors.BRIGHT_PURPLE)
+        # Инициализация маппера героев
         self.hero_mapper = HeroMapper(excluded_hero_ids=EXCLUDED_HERO_IDS)
-        mapper_info = self.hero_mapper.get_mapping_info()
-        print_info_line("Диапазон индексов", f"{mapper_info['index_range']}", "🔢")
-        print_info_line("Исключено героев", f"{mapper_info['excluded_heroes_count']}", "❌",
-                        value_color=Colors.BRIGHT_RED)
-        print_info_line("Итого героев", f"{mapper_info['total_heroes']:,}", "🧙‍♂️")
+        if not self.hero_mapper.initialize():
+            raise RuntimeError("HeroMapper: не удалось построить маппинг героев")
 
     def _get_match_ids(self) -> Tuple[List[int], List[int]]:
         """
@@ -621,9 +617,6 @@ class HDF5Preprocessor:
             print_subsection_header(f"Статистика {file_type.lower()} файла", file_icon, Colors.BRIGHT_BLUE)
             print_info_line("Размер файла", f"{file_size_mb:.2f} MB", "📏", value_color=Colors.BRIGHT_CYAN)
             print_info_line("Количество матчей", f"{valid_matches:,}", "🎯", value_color=Colors.BRIGHT_GREEN)
-
-        # Освобождение ресурсов маппера героев
-        self.hero_mapper.cleanup()
 
     def validate_hdf5_files(self):
         """

@@ -110,6 +110,8 @@ class DataLoaderV1:
         """
 
         self.hero_mapper = HeroMapper(excluded_hero_ids=excluded_hero_ids)
+        if not self.hero_mapper.initialize():
+            raise RuntimeError("HeroMapper: не удалось построить маппинг героев")
 
     @staticmethod
     def _resolve_target_fields(target: str) -> Tuple[str, ...]:
